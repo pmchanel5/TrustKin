@@ -67,7 +67,9 @@ async function refreshCircle(renderAfter = true) {
 function shouldRenderNow() {
   const el = document.activeElement;
   if (!el || el === document.body) return true;
-  return ["BUTTON", "A"].includes(el.tagName);
+  if (["BUTTON", "A"].includes(el.tagName)) return true;
+  if (el.tagName === "INPUT" && (el.readOnly || el.disabled)) return true;
+  return false;
 }
 
 function showToast(message) {
