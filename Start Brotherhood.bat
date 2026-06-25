@@ -2,23 +2,35 @@
 setlocal
 cd /d "%~dp0"
 
-where py >nul 2>nul
-if %errorlevel%==0 (
-  py -3 app\brotherhood.py
-  exit /b %errorlevel%
+set VENV_PY=.venv\Scripts\python.exe
+if not exist "%VENV_PY%" (
+  where py >nul 2>nul
+  if not errorlevel 1 (
+    py -3 -m venv .venv
+  ) else (
+    where python >nul 2>nul
+    if not errorlevel 1 (
+      python -m venv .venv
+    ) else (
+      echo Python was not found. Install Python 3.11 or newer, then run this file again.
+      pause
+      exit /b 1
+    )
+  )
 )
 
-where python >nul 2>nul
-if %errorlevel%==0 (
-  python app\brotherhood.py
-  exit /b %errorlevel%
+if not exist "%VENV_PY%" (
+  echo Failed to create the local Python environment.
+  pause
+  exit /b 1
 )
 
-set BUNDLED_PY=C:\Users\leobe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe
-if exist "%BUNDLED_PY%" (
-  "%BUNDLED_PY%" app\brotherhood.py
-  exit /b %errorlevel%
+"%VENV_PY%" -m pip install --disable-pip-version-check -r requirements.txt
+if errorlevel 1 (
+  echo Failed to install Brotherhood requirements. Check your internet connection, then try again.
+  pause
+  exit /b 1
 )
 
-echo Python was not found. Install Python 3.11 or newer, then run this file again.
-pause
+"%VENV_PY%" app\brotherhood.py
+exit /b %errorlevel%

@@ -6,7 +6,7 @@ A private desktop MVP for a small friend circle: post wins or plans, send encour
 
 Double-click `Start Brotherhood.bat`.
 
-The app opens in your browser as a local desktop app. On first launch, create a profile. Nickname is required; image is optional.
+The launcher creates a local `.venv` folder on first run and installs pinned requirements from `requirements.txt`, including Pillow for safe image validation. The app opens in your browser as a local desktop app. On first launch, create a profile. Nickname is required; image is optional.
 
 After that, each launch asks whether you want to `Host circle` or `Join circle`. Your profile stays on the computer, but the connection mode resets when the app closes.
 
@@ -22,6 +22,16 @@ You can switch modes from the Connection panel. Switching from Host to Join stop
 Use `Close app` in the top bar to stop the local server and the app process.
 
 Distance hosting uses Cloudflare Quick Tunnel through the bundled `cloudflared.exe`. The public URL is temporary and changes whenever the host restarts the app. If the public URL does not appear, check that the host computer has internet access and that antivirus/firewall did not block `cloudflared.exe`.
+
+## Build `dist`
+
+Run this after pulling updates or changing code:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_dist.ps1
+```
+
+The script creates or uses `.venv`, installs `requirements-build.txt`, removes the old generated `dist/`, `build/`, and `Brotherhood.spec`, then creates `dist\Brotherhood\Brotherhood.exe` with Pillow and the latest app files bundled.
 
 ## Privacy shape
 

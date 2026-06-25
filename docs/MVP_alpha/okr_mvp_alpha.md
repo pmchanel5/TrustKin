@@ -191,7 +191,7 @@ Target: real tester builds are uploaded as GitHub Release assets.
 
 Target: CI downloads a pinned Cloudflare binary and verifies SHA-256.
 
-### [ ] KR4.6 - Start scripts contain no machine-specific absolute paths
+### [x] KR4.6 - Start scripts contain no machine-specific absolute paths
 
 Target: `.bat` and `.ps1` scripts have no local machine paths.
 
@@ -200,7 +200,7 @@ Target: `.bat` and `.ps1` scripts have no local machine paths.
 - [ ] Add CI build workflow.
 - [ ] Add release workflow on `v*` tags.
 - [ ] Add checksum verification for Cloudflare binary.
-- [ ] Remove local Codex Python fallback path from `.bat` and `.ps1`.
+- [x] Remove local Codex Python fallback path from `.bat` and `.ps1`.
 
 ---
 
