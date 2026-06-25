@@ -7,6 +7,8 @@ let activeTab = "feed";
 let setupMode = "host";
 let setupAvatar = "";
 let setupDraft = { nickname: "", relay_url: "", invite_token: "" };
+let profileEditorOpen = false;
+let profileAvatarDraft = null;
 let postImage = "";
 let lastError = "";
 let refreshTimer = null;
@@ -115,6 +117,7 @@ function tunnelLabel(settings) {
   if (settings?.public_url) return "Internet invite ready";
   if (!settings?.hosting_enabled) return "Start hosting to create a public invite.";
   if (!tunnel.available) return "Internet invite unavailable";
+  if (tunnel.status === "checking" && settings?.pending_public_url) return "Cloudflare invite URL created";
   if (tunnel.status === "checking") return "Internet invite checking";
   if (tunnel.status === "failed") return "Internet invite failed";
   if (tunnel.status === "missing") return "Cloudflare tunnel helper is missing";
@@ -173,12 +176,15 @@ function render() {
 
 function renderSetup() {
   const settings = bootstrap.settings;
-  const inviteUrl = settings.host_invite_url || "";
+  const readyInviteUrl = settings.host_invite_url || "";
+  const pendingInviteUrl = settings.pending_host_invite_url || "";
+  const inviteUrl = readyInviteUrl || pendingInviteUrl;
+  const copyableInviteUrl = readyInviteUrl || pendingInviteUrl;
   const inviteToken = settings.host_invite_token || "";
   const hasProfile = Boolean(settings.has_profile);
   const hostActive = settings.connection_mode === "host" && settings.hosting_enabled;
   const tunnel = settings.tunnel || {};
-  const hostStatus = `${tunnelLabel(settings)}${tunnel.error ? `: ${tunnel.error}` : ""}`;
+  const hostStatus = `${tunnelLabel(settings)}${hostActive && tunnel.error && !pendingInviteUrl ? `: ${tunnel.error}` : ""}`;
   const profileName = settings.nickname || setupDraft.nickname || "";
   const profileAvatar = safeImageSrc(setupAvatar || settings.avatar || "");
   app.innerHTML = `
@@ -196,13 +202,7 @@ function renderSetup() {
           <p>${hasProfile ? "Your profile is ready. Pick Host or Join for this session." : "Your nickname is required. The profile image can wait."}</p>
           <form id="setupForm" class="setup-form">
             ${hasProfile ? `
-              <div class="profile-card">
-                ${avatarHtml({ nickname: profileName, avatar: profileAvatar }, "avatar-large")}
-                <div>
-                  <strong>${escapeHtml(profileName || "Brother")}</strong>
-                  <span class="muted small">Profile kept from this computer</span>
-                </div>
-              </div>
+              ${renderProfilePanel(settings, { nickname: profileName || "Brother", avatar: profileAvatar })}
             ` : `
               <div class="avatar-row">
                 <span id="setupAvatarPreview">${profileAvatar ? `<span class="avatar-large"><img src="${escapeHtml(profileAvatar)}" alt=""></span>` : `<span class="avatar-large">BH</span>`}</span>
@@ -228,7 +228,7 @@ function renderSetup() {
                   Invite URL
                   <input value="${escapeHtml(inviteUrl)}" placeholder="${hostActive ? "Waiting for trycloudflare.com..." : "Continue to start hosting"}" readonly>
                 </label>
-                <button type="button" data-copy="${escapeHtml(inviteUrl)}" ${inviteUrl ? "" : "disabled"}>Copy URL</button>
+                <button type="button" data-copy="${escapeHtml(copyableInviteUrl)}" ${copyableInviteUrl ? "" : "disabled"}>Copy URL</button>
               </div>
               <div class="copy-row">
                 <label>
@@ -258,6 +258,63 @@ function renderSetup() {
   wireSetup();
 }
 
+function wireProfileEditor(afterSave) {
+  document.querySelector('[data-action="edit-profile"]')?.addEventListener("click", () => {
+    profileEditorOpen = true;
+    profileAvatarDraft = null;
+    if (bootstrap?.settings?.connection_mode) {
+      renderDashboard();
+    } else {
+      renderSetup();
+    }
+  });
+
+  document.querySelector('[data-action="cancel-profile-edit"]')?.addEventListener("click", () => {
+    profileEditorOpen = false;
+    profileAvatarDraft = null;
+    if (bootstrap?.settings?.connection_mode) {
+      renderDashboard();
+    } else {
+      renderSetup();
+    }
+  });
+
+  document.querySelector('[data-action="remove-profile-picture"]')?.addEventListener("click", () => {
+    profileAvatarDraft = "";
+    const preview = document.getElementById("profileAvatarPreview");
+    if (preview) preview.innerHTML = `<span class="avatar-large">${escapeHtml(initials(document.getElementById("profileNickname")?.value || bootstrap.settings.nickname || "B"))}</span>`;
+  });
+
+  document.getElementById("profileAvatarInput")?.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    profileAvatarDraft = await resizeImage(file, 300, 0.82);
+    const avatar = safeImageSrc(profileAvatarDraft);
+    if (!avatar) {
+      profileAvatarDraft = null;
+      showToast("Image could not be loaded.");
+      return;
+    }
+    const preview = document.getElementById("profileAvatarPreview");
+    if (preview) preview.innerHTML = `<span class="avatar-large"><img src="${escapeHtml(avatar)}" alt=""></span>`;
+  });
+
+  document.getElementById("profileForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const nickname = (document.getElementById("profileNickname")?.value || "").trim();
+    const avatar = profileAvatarDraft === null ? (bootstrap.settings.avatar || "") : profileAvatarDraft;
+    try {
+      circle = await api("/api/profile", { nickname, avatar });
+      profileEditorOpen = false;
+      profileAvatarDraft = null;
+      await afterSave();
+      showToast("Profile saved.");
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+}
+
 function wireSetup() {
   document.querySelectorAll("[data-setup-mode]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -271,6 +328,11 @@ function wireSetup() {
 
   document.querySelectorAll("[data-copy]").forEach((button) => {
     button.addEventListener("click", () => copyText(button.dataset.copy || ""));
+  });
+
+  wireProfileEditor(async () => {
+    await loadBootstrap();
+    renderSetup();
   });
 
   document.getElementById("setupAvatarInput")?.addEventListener("change", async (event) => {
@@ -349,21 +411,17 @@ function renderMain() {
 
 function renderSidebar(settings, me) {
   const hostUrl = settings.host_invite_url || "";
+  const pendingHostUrl = settings.pending_host_invite_url || "";
+  const copyableHostUrl = hostUrl || pendingHostUrl;
   const hostToken = settings.host_invite_token || "";
-  const relayField = settings.is_host ? hostUrl : settings.relay_url;
+  const relayField = settings.is_host ? (hostUrl || pendingHostUrl) : settings.relay_url;
   const shownToken = settings.is_host ? "" : settings.invite_token;
   const hostActive = settings.connection_mode === "host";
   const tunnel = settings.tunnel || {};
   const tunnelText = tunnelLabel(settings);
   return `
     <section class="panel">
-      <div class="profile-card">
-        ${avatarHtml(me, "avatar-large")}
-        <div>
-          <strong>${escapeHtml(me.nickname)}</strong>
-          <span class="muted small">${settings.is_host ? "Hosting circle" : "Joined circle"}</span>
-        </div>
-      </div>
+      ${renderProfilePanel(settings, me)}
     </section>
     <section class="panel connection">
       <div class="section-head">
@@ -395,8 +453,8 @@ function renderSidebar(settings, me) {
             Invite token
             <input value="${escapeHtml(hostToken || "")}" readonly>
           </label>
-          <p class="muted small">${escapeHtml(tunnelText)}${tunnel.error ? `: ${escapeHtml(tunnel.error)}` : ""}</p>
-          <button type="button" data-copy="${escapeHtml(hostUrl)}" ${hostUrl ? "" : "disabled"}>Copy invite URL</button>
+          <p class="muted small">${escapeHtml(tunnelText)}${hostActive && tunnel.error && !pendingHostUrl ? `: ${escapeHtml(tunnel.error)}` : ""}</p>
+          <button type="button" data-copy="${escapeHtml(copyableHostUrl)}" ${copyableHostUrl ? "" : "disabled"}>Copy invite URL</button>
           <button type="button" data-copy="${escapeHtml(hostToken)}" ${hostToken ? "" : "disabled"}>Copy token</button>
         </div>
       ` : `
@@ -413,6 +471,43 @@ function renderSidebar(settings, me) {
         </form>
       `}
     </section>
+  `;
+}
+
+function renderProfilePanel(settings, me) {
+  if (!profileEditorOpen) {
+    return `
+      <div class="profile-card">
+        ${avatarHtml(me, "avatar-large")}
+        <div>
+          <strong>${escapeHtml(me.nickname)}</strong>
+          <span class="muted small">${settings.connection_mode ? (settings.is_host ? "Hosting circle" : "Joined circle") : "Profile kept from this computer"}</span>
+        </div>
+        <button type="button" class="soft profile-edit-button" data-action="edit-profile">Edit</button>
+      </div>
+    `;
+  }
+  const draftAvatar = profileAvatarDraft === null ? settings.avatar || "" : profileAvatarDraft;
+  const previewAvatar = safeImageSrc(draftAvatar);
+  return `
+    <form id="profileForm" class="profile-editor">
+      <div class="avatar-row">
+        <span id="profileAvatarPreview">${previewAvatar ? `<span class="avatar-large"><img src="${escapeHtml(previewAvatar)}" alt=""></span>` : `<span class="avatar-large">${escapeHtml(initials(settings.nickname || "B"))}</span>`}</span>
+        <label>
+          Profile image
+          <input id="profileAvatarInput" type="file" accept="image/*">
+        </label>
+      </div>
+      <label>
+        Nickname
+        <input id="profileNickname" required maxlength="32" autocomplete="nickname" value="${escapeHtml(settings.nickname || "")}">
+      </label>
+      <div class="form-actions">
+        <button type="button" class="soft" data-action="remove-profile-picture">Remove picture</button>
+        <button type="button" data-action="cancel-profile-edit">Cancel</button>
+        <button class="primary" type="submit">Save profile</button>
+      </div>
+    </form>
   `;
 }
 
@@ -715,6 +810,12 @@ function wireDashboard() {
     }
   });
 
+  wireProfileEditor(async () => {
+    await loadBootstrap();
+    await refreshCircle(false);
+    renderDashboard();
+  });
+
   document.getElementById("connectionForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const inviteValue = document.getElementById("relayUrl").value;
@@ -845,7 +946,7 @@ function wireDashboard() {
 
   document.querySelectorAll("[data-action]").forEach((button) => {
     const action = button.dataset.action;
-    if (["switch-host", "switch-join", "close-app", "clear-post-image"].includes(action)) return;
+    if (["switch-host", "switch-join", "close-app", "clear-post-image", "edit-profile", "cancel-profile-edit", "remove-profile-picture"].includes(action)) return;
     button.addEventListener("click", () => handleAction(action, button.dataset.id));
   });
 }

@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 try:
@@ -50,6 +51,9 @@ JOIN_RATE_LIMIT_GLOBAL = 30
 JOIN_FAILURE_WINDOW_SECONDS = 5 * 60
 JOIN_FAILURE_LOCK_SECONDS = 5 * 60
 JOIN_FAILURE_LOCK_THRESHOLD = 10
+TUNNEL_START_ATTEMPTS = 3
+TUNNEL_CANDIDATE_TIMEOUT_SECONDS = 20
+TUNNEL_READY_TIMEOUT_SECONDS = 90
 MAX_IMAGE_PIXELS = 4_000_000
 IMAGE_DATA_URL_RE = re.compile(r"^data:image/(jpeg|jpg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$")
 INVITE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
@@ -369,10 +373,11 @@ class TunnelManager:
                 return self.url
 
         last_error = ""
-        for _ in range(3):
+        final_status = "failed"
+        for _ in range(TUNNEL_START_ATTEMPTS):
             self._launch()
-            candidate = self._wait_for_candidate(14)
-            if candidate and self._url_works(candidate, 24):
+            candidate = self._wait_for_candidate(TUNNEL_CANDIDATE_TIMEOUT_SECONDS)
+            if candidate and self._url_works(candidate, TUNNEL_READY_TIMEOUT_SECONDS):
                 with self._lock:
                     self.url = candidate
                     self.status = "online"
@@ -380,11 +385,15 @@ class TunnelManager:
                 return candidate
             with self._lock:
                 last_error = self.error or "Public invite URL was not reachable yet."
+                if self.status == "missing":
+                    final_status = "missing"
             self.stop()
+            if final_status == "missing":
+                break
             time.sleep(1)
 
         with self._lock:
-            self.status = "failed"
+            self.status = final_status
             self.error = last_error
         return ""
 
@@ -461,7 +470,15 @@ class TunnelManager:
             return False
         deadline = now_ts() + timeout
         health_url = normalize_relay_url(url) + "/relay/ping"
+        last_error = ""
+        saw_dns_error = False
         while now_ts() < deadline:
+            with self._lock:
+                process = self.process
+                exit_code = process.poll() if process else None
+                if not process or exit_code is not None:
+                    self.error = f"Cloudflare tunnel stopped before the invite was ready. Exit code: {exit_code}"
+                    return False
             try:
                 req = Request(health_url, headers={"Accept": "application/json"})
                 with urlopen(req, timeout=5) as resp:
@@ -469,10 +486,44 @@ class TunnelManager:
                 if resp.status == 200 and payload.get("ok") is True and payload.get("app") == APP_NAME:
                     return True
             except Exception as exc:
+                last_error = self._friendly_url_error(exc)
+                saw_dns_error = saw_dns_error or self._is_dns_error(exc)
                 with self._lock:
-                    self.error = str(exc)[:180]
+                    self.error = last_error
             time.sleep(1)
+        with self._lock:
+            if saw_dns_error:
+                self.error = "Cloudflare created an invite address, but this computer could not resolve it yet. Check internet or DNS settings, then try hosting again."
+            else:
+                self.error = last_error or "Cloudflare created an invite address, but Brotherhood did not answer through it yet."
         return False
+
+    def _is_dns_error(self, exc: Exception) -> bool:
+        if isinstance(exc, URLError):
+            reason = getattr(exc, "reason", "")
+            return isinstance(reason, socket.gaierror) or "getaddrinfo" in str(reason).lower()
+        return "getaddrinfo" in str(exc).lower()
+
+    def _friendly_url_error(self, exc: Exception) -> str:
+        if isinstance(exc, HTTPError):
+            return f"Cloudflare is reachable, but the invite is not ready yet. HTTP {exc.code}."
+        if self._is_dns_error(exc):
+            return "Cloudflare created an invite address. Waiting for DNS to recognize it..."
+        text = str(exc).lower()
+        if "timed out" in text or "timeout" in text:
+            return "Cloudflare invite address did not answer yet. Still checking..."
+        return "Cloudflare invite address is not ready yet. Still checking..."
+
+    def _display_error(self, error: str) -> str:
+        if not error:
+            return ""
+        text = str(error)
+        lowered = text.lower()
+        if "getaddrinfo" in lowered or "urlopen error" in lowered:
+            if self.status == "checking":
+                return "Cloudflare created an invite address. Waiting for DNS to recognize it..."
+            return "Cloudflare created an invite address, but this computer could not resolve it yet. Check internet or DNS settings, then try hosting again."
+        return text[:180]
 
     def _read_output(self) -> None:
         assert self.process is not None
@@ -523,7 +574,7 @@ class TunnelManager:
                 "available": self.available(),
                 "url": self.url,
                 "status": self.status,
-                "error": self.error,
+                "error": self._display_error(self.error),
                 "recent": list(self.lines)[-5:],
             }
 
@@ -989,8 +1040,10 @@ def bootstrap_payload() -> dict:
     host_active = is_hosting_enabled(settings)
     tunnel_info = TUNNEL_MANAGER.info()
     public_url = tunnel_info.get("url") if host_active and tunnel_info.get("status") == "online" else ""
+    pending_public_url = tunnel_info.get("url") if host_active and tunnel_info.get("status") == "checking" else ""
     host_invite_token = current_invite_token() if host_active else ""
     host_invite_url = invite_url_for(public_url, host_invite_token)
+    pending_host_invite_url = invite_url_for(pending_public_url, host_invite_token)
     if host_active:
         relay = public_url
     return {
@@ -1010,8 +1063,10 @@ def bootstrap_payload() -> dict:
             "local_relay_url": local_relay_base_url(),
             "invite_urls": [],
             "public_url": public_url,
+            "pending_public_url": pending_public_url,
             "host_circle_code": "",
             "host_invite_url": host_invite_url,
+            "pending_host_invite_url": pending_host_invite_url,
             "host_invite_token": host_invite_token,
             "hosting_enabled": host_active,
             "is_host": host_active,

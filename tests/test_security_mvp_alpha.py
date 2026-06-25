@@ -2,13 +2,14 @@ import base64
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -194,23 +195,40 @@ class SecurityMvpAlphaTests(unittest.TestCase):
             host_settings = payload["settings"]
             self.assertEqual(host_settings["relay_url"], "")
             self.assertEqual(host_settings["public_url"], "")
+            self.assertEqual(host_settings["pending_public_url"], "")
             self.assertEqual(host_settings["host_invite_url"], "")
+            self.assertEqual(host_settings["pending_host_invite_url"], "")
             self.assertTrue(host_settings["host_invite_token"])
 
             brotherhood.TUNNEL_MANAGER = FakeTunnelManager("checking", "https://example.trycloudflare.com")
             payload = brotherhood.bootstrap_payload()
             host_settings = payload["settings"]
             self.assertEqual(host_settings["public_url"], "")
+            self.assertEqual(host_settings["pending_public_url"], "https://example.trycloudflare.com")
             self.assertEqual(host_settings["host_invite_url"], "")
+            self.assertTrue(host_settings["pending_host_invite_url"].startswith("https://example.trycloudflare.com/join#token="))
 
             brotherhood.TUNNEL_MANAGER = FakeTunnelManager("online", "https://example.trycloudflare.com")
             payload = brotherhood.bootstrap_payload()
             host_settings = payload["settings"]
             self.assertEqual(host_settings["public_url"], "https://example.trycloudflare.com")
+            self.assertEqual(host_settings["pending_public_url"], "")
             self.assertTrue(host_settings["host_invite_url"].startswith("https://example.trycloudflare.com/join#token="))
+            self.assertEqual(host_settings["pending_host_invite_url"], "")
         finally:
             brotherhood.TUNNEL_MANAGER = old_manager
             brotherhood.reset_connection_choice()
+
+    def test_tunnel_dns_error_is_rendered_as_friendly_status(self) -> None:
+        manager = brotherhood.TunnelManager()
+        error = manager._friendly_url_error(URLError(socket.gaierror(11001, "getaddrinfo failed")))
+        self.assertIn("Cloudflare", error)
+        self.assertNotIn("getaddrinfo", error)
+        self.assertNotIn("urlopen", error)
+
+        manager.status = "failed"
+        manager.error = "<urlopen error [Errno 11001] getaddrinfo failed>"
+        self.assertNotIn("getaddrinfo", manager.info()["error"])
 
 
 def tearDownModule() -> None:
