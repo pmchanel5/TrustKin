@@ -49,6 +49,13 @@ async function loadBootstrap() {
 async function refreshCircle(renderAfter = true) {
   if (!bootstrap?.settings?.user_id) return;
   try {
+    if (bootstrap.settings.is_host || bootstrap.settings.hosting_enabled || ["starting", "checking"].includes(bootstrap.settings.tunnel?.status)) {
+      await loadBootstrap();
+    }
+    if (!bootstrap.settings.connection_mode) {
+      if (renderAfter && shouldRenderNow()) render();
+      return;
+    }
     circle = await api("/api/state");
     lastError = "";
   } catch (error) {
@@ -99,6 +106,17 @@ function parseInviteValue(value) {
   } catch {
     return { relayUrl: raw, token: "" };
   }
+}
+
+function tunnelLabel(settings) {
+  const tunnel = settings?.tunnel || {};
+  if (settings?.public_url) return "Internet invite ready";
+  if (!settings?.hosting_enabled) return "Start hosting to create a public invite.";
+  if (!tunnel.available) return "Internet invite unavailable";
+  if (tunnel.status === "checking") return "Internet invite checking";
+  if (tunnel.status === "failed") return "Internet invite failed";
+  if (tunnel.status === "missing") return "Cloudflare tunnel helper is missing";
+  return `Internet invite ${tunnel.status || "starting"}`;
 }
 
 function initials(name) {
@@ -154,7 +172,11 @@ function render() {
 function renderSetup() {
   const settings = bootstrap.settings;
   const inviteUrl = settings.host_invite_url || "";
+  const inviteToken = settings.host_invite_token || "";
   const hasProfile = Boolean(settings.has_profile);
+  const hostActive = settings.connection_mode === "host" && settings.hosting_enabled;
+  const tunnel = settings.tunnel || {};
+  const hostStatus = `${tunnelLabel(settings)}${tunnel.error ? `: ${tunnel.error}` : ""}`;
   const profileName = settings.nickname || setupDraft.nickname || "";
   const profileAvatar = safeImageSrc(setupAvatar || settings.avatar || "");
   app.innerHTML = `
@@ -202,10 +224,18 @@ function renderSetup() {
               <div class="copy-row">
                 <label>
                   Invite URL
-                  <input value="${escapeHtml(inviteUrl)}" readonly>
+                  <input value="${escapeHtml(inviteUrl)}" placeholder="${hostActive ? "Waiting for trycloudflare.com..." : "Continue to start hosting"}" readonly>
                 </label>
-                <button type="button" data-copy="${escapeHtml(inviteUrl)}">Copy</button>
+                <button type="button" data-copy="${escapeHtml(inviteUrl)}" ${inviteUrl ? "" : "disabled"}>Copy URL</button>
               </div>
+              <div class="copy-row">
+                <label>
+                  Invite token
+                  <input value="${escapeHtml(inviteToken)}" placeholder="${hostActive ? "Creating token..." : "Available after hosting starts"}" readonly>
+                </label>
+                <button type="button" data-copy="${escapeHtml(inviteToken)}" ${inviteToken ? "" : "disabled"}>Copy token</button>
+              </div>
+              <p class="muted small">${escapeHtml(hostStatus)}</p>
             </div>
             <div id="joinFields" class="join-fields ${setupMode === "join" ? "" : "hidden"}">
               <label>
@@ -217,7 +247,7 @@ function renderSetup() {
                 <input id="setupToken" maxlength="256" value="${escapeHtml(setupDraft.invite_token)}">
               </label>
             </div>
-            <button class="primary" type="submit">${hasProfile ? "Continue" : "Enter"}</button>
+            <button class="primary" type="submit">${hasProfile ? (setupMode === "host" ? "Start hosting" : "Join circle") : "Enter"}</button>
           </form>
         </div>
       </section>
@@ -317,15 +347,12 @@ function renderMain() {
 
 function renderSidebar(settings, me) {
   const hostUrl = settings.host_invite_url || "";
+  const hostToken = settings.host_invite_token || "";
   const relayField = settings.is_host ? hostUrl : settings.relay_url;
   const shownToken = settings.is_host ? "" : settings.invite_token;
   const hostActive = settings.connection_mode === "host";
   const tunnel = settings.tunnel || {};
-  const tunnelText = settings.public_url
-    ? "Internet invite ready"
-    : tunnel.available
-      ? `Internet invite ${tunnel.status || "starting"}`
-      : "Internet invite unavailable";
+  const tunnelText = tunnelLabel(settings);
   return `
     <section class="panel">
       <div class="profile-card">
@@ -360,10 +387,15 @@ function renderSidebar(settings, me) {
         <div class="connection">
           <label>
             Invite URL
-            <input value="${escapeHtml(relayField || "")}" readonly>
+            <input value="${escapeHtml(relayField || "")}" placeholder="Waiting for trycloudflare.com..." readonly>
+          </label>
+          <label>
+            Invite token
+            <input value="${escapeHtml(hostToken || "")}" readonly>
           </label>
           <p class="muted small">${escapeHtml(tunnelText)}${tunnel.error ? `: ${escapeHtml(tunnel.error)}` : ""}</p>
-          <button type="button" data-copy="${escapeHtml(hostUrl)}">Copy invite</button>
+          <button type="button" data-copy="${escapeHtml(hostUrl)}" ${hostUrl ? "" : "disabled"}>Copy invite URL</button>
+          <button type="button" data-copy="${escapeHtml(hostToken)}" ${hostToken ? "" : "disabled"}>Copy token</button>
         </div>
       ` : `
         <form id="connectionForm" class="connection">
@@ -863,6 +895,10 @@ async function handleAction(action, id) {
 }
 
 async function copyText(text) {
+  if (!text) {
+    showToast("Nothing to copy yet.");
+    return;
+  }
   try {
     await navigator.clipboard.writeText(text);
     showToast("Copied.");

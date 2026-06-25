@@ -983,6 +983,44 @@ TRACKER = ActivityTracker()
 TUNNEL_MANAGER = TunnelManager()
 
 
+def bootstrap_payload() -> dict:
+    settings = load_settings()
+    relay = normalize_relay_url(settings.get("relay_url"))
+    host_active = is_hosting_enabled(settings)
+    tunnel_info = TUNNEL_MANAGER.info()
+    public_url = tunnel_info.get("url") if host_active and tunnel_info.get("status") == "online" else ""
+    host_invite_token = current_invite_token() if host_active else ""
+    host_invite_url = invite_url_for(public_url, host_invite_token)
+    if host_active:
+        relay = public_url
+    return {
+        "ok": True,
+        "settings": {
+            "user_id": settings.get("user_id", ""),
+            "nickname": settings.get("nickname", ""),
+            "avatar": settings.get("avatar", ""),
+            "has_profile": bool(settings.get("user_id") and settings.get("nickname")),
+            "connection_mode": settings.get("connection_mode", ""),
+            "needs_connection": not bool(settings.get("connection_mode")),
+            "relay_url": relay,
+            "circle_code": "",
+            "invite_token": "" if host_active else settings.get("invite_token", ""),
+            "share_activity": bool(settings.get("share_activity", True)),
+            "local_url": local_base_url(),
+            "local_relay_url": local_relay_base_url(),
+            "invite_urls": [],
+            "public_url": public_url,
+            "host_circle_code": "",
+            "host_invite_url": host_invite_url,
+            "host_invite_token": host_invite_token,
+            "hosting_enabled": host_active,
+            "is_host": host_active,
+            "tunnel": tunnel_info,
+        },
+        "local_activity": TRACKER.summary(),
+    }
+
+
 class BrotherhoodHandler(BaseHTTPRequestHandler):
     server_version = "BrotherhoodMVP/0.1"
     public_relay_server = False
@@ -1040,44 +1078,7 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
 
     def handle_api_get(self, parsed) -> None:
         if parsed.path == "/api/bootstrap":
-            settings = load_settings()
-            relay = normalize_relay_url(settings.get("relay_url"))
-            host_active = is_hosting_enabled(settings)
-            tunnel_info = TUNNEL_MANAGER.info()
-            public_url = tunnel_info.get("url") if host_active else ""
-            host_invite_token = current_invite_token() if host_active else ""
-            host_relay_url = public_url or (local_relay_base_url() if host_active else "")
-            host_invite_url = invite_url_for(host_relay_url, host_invite_token)
-            if public_url:
-                relay = public_url
-            elif host_active:
-                relay = local_relay_base_url()
-            payload = {
-                "ok": True,
-                "settings": {
-                    "user_id": settings.get("user_id", ""),
-                    "nickname": settings.get("nickname", ""),
-                    "avatar": settings.get("avatar", ""),
-                    "has_profile": bool(settings.get("user_id") and settings.get("nickname")),
-                    "connection_mode": settings.get("connection_mode", ""),
-                    "needs_connection": not bool(settings.get("connection_mode")),
-                    "relay_url": relay,
-                    "circle_code": "",
-                    "invite_token": "" if host_active else settings.get("invite_token", ""),
-                    "share_activity": bool(settings.get("share_activity", True)),
-                    "local_url": local_base_url(),
-                    "local_relay_url": local_relay_base_url(),
-                    "invite_urls": [],
-                    "public_url": public_url,
-                    "host_circle_code": "",
-                    "host_invite_url": host_invite_url,
-                    "hosting_enabled": host_active,
-                    "is_host": host_active,
-                    "tunnel": tunnel_info,
-                },
-                "local_activity": TRACKER.summary(),
-            }
-            json_response(self, 200, payload)
+            json_response(self, 200, bootstrap_payload())
             return
         if parsed.path == "/api/state":
             try:
@@ -1102,7 +1103,7 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
                     current_invite_token()
                     settings["connection_mode"] = "host"
                     settings["hosting_enabled"] = True
-                    settings["relay_url"] = local_relay_base_url()
+                    settings["relay_url"] = ""
                     settings["circle_code"] = ""
                     settings["invite_token"] = ""
                     ensure_local_profile(settings)

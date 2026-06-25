@@ -162,6 +162,56 @@ class SecurityMvpAlphaTests(unittest.TestCase):
         self.assertNotIn('relay_get("/relay/state', source)
         self.assertNotIn("actor_secret=", source)
 
+    def test_host_bootstrap_does_not_expose_local_invite_url_while_tunnel_starts(self) -> None:
+        class FakeTunnelManager:
+            def __init__(self, status: str, url: str = "") -> None:
+                self.status = status
+                self.url = url
+
+            def info(self) -> dict:
+                return {
+                    "available": True,
+                    "url": self.url,
+                    "status": self.status,
+                    "error": "",
+                    "recent": [],
+                }
+
+        old_manager = brotherhood.TUNNEL_MANAGER
+        settings = brotherhood.default_settings()
+        settings.update({
+            "user_id": "c" * 32,
+            "user_secret": "host-secret",
+            "nickname": "Host",
+            "connection_mode": "host",
+            "hosting_enabled": True,
+            "relay_url": brotherhood.local_relay_base_url(),
+        })
+        brotherhood.save_settings(settings)
+        try:
+            brotherhood.TUNNEL_MANAGER = FakeTunnelManager("starting")
+            payload = brotherhood.bootstrap_payload()
+            host_settings = payload["settings"]
+            self.assertEqual(host_settings["relay_url"], "")
+            self.assertEqual(host_settings["public_url"], "")
+            self.assertEqual(host_settings["host_invite_url"], "")
+            self.assertTrue(host_settings["host_invite_token"])
+
+            brotherhood.TUNNEL_MANAGER = FakeTunnelManager("checking", "https://example.trycloudflare.com")
+            payload = brotherhood.bootstrap_payload()
+            host_settings = payload["settings"]
+            self.assertEqual(host_settings["public_url"], "")
+            self.assertEqual(host_settings["host_invite_url"], "")
+
+            brotherhood.TUNNEL_MANAGER = FakeTunnelManager("online", "https://example.trycloudflare.com")
+            payload = brotherhood.bootstrap_payload()
+            host_settings = payload["settings"]
+            self.assertEqual(host_settings["public_url"], "https://example.trycloudflare.com")
+            self.assertTrue(host_settings["host_invite_url"].startswith("https://example.trycloudflare.com/join#token="))
+        finally:
+            brotherhood.TUNNEL_MANAGER = old_manager
+            brotherhood.reset_connection_choice()
+
 
 def tearDownModule() -> None:
     TEST_DATA.cleanup()
