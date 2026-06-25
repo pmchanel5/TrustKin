@@ -6,12 +6,12 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import secrets
-import shutil
 import socket
-import sqlite3
+import ssl
+import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -20,7 +20,7 @@ from collections import Counter, deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -29,7 +29,6 @@ DEFAULT_PORT = 8765
 MAX_BODY_BYTES = 900_000
 SAMPLE_SECONDS = 10
 PUBLISH_SECONDS = 20
-SITE_SCAN_SECONDS = 60
 
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     BASE_DIR = Path(sys._MEIPASS)
@@ -37,6 +36,7 @@ else:
     BASE_DIR = Path(__file__).resolve().parent
 
 WEB_DIR = BASE_DIR / "web"
+BIN_DIR = BASE_DIR / "bin"
 DATA_DIR = Path(os.environ.get("APPDATA", str(BASE_DIR))) / "BrotherhoodMVP"
 DB_PATH = DATA_DIR / "circle.json"
 SETTINGS_PATH = DATA_DIR / "local_settings.json"
@@ -62,31 +62,6 @@ SENSITIVE_APP_WORDS = {
     "wallet",
 }
 
-SENSITIVE_DOMAIN_WORDS = {
-    "bank",
-    "paypal",
-    "stripe",
-    "wise",
-    "revolut",
-    "gmail",
-    "outlook",
-    "mail",
-    "docs.google",
-    "drive.google",
-    "calendar.google",
-    "photos.google",
-    "meet.google",
-    "accounts.",
-    "login.",
-    "auth.",
-    "signin",
-    "whatsapp",
-    "telegram",
-    "signal",
-    "health",
-    "medical",
-}
-
 FRIENDLY_APPS = {
     "chrome": "Chrome",
     "msedge": "Edge",
@@ -101,7 +76,9 @@ FRIENDLY_APPS = {
     "winword": "Word",
     "excel": "Excel",
     "powerpnt": "PowerPoint",
-    "discord": "Private app",
+    "discord": "Discord",
+    "steam": "Steam",
+    "codex": "Codex",
 }
 
 
@@ -143,6 +120,7 @@ def default_db() -> dict:
         "profiles": {},
         "user_secrets": {},
         "posts": [],
+        "comments": [],
         "notes": [],
         "requests": [],
         "permissions": {},
@@ -251,6 +229,184 @@ def local_base_url() -> str:
     return f"http://127.0.0.1:{SERVER_PORT}"
 
 
+class TunnelManager:
+    def __init__(self) -> None:
+        self.process: subprocess.Popen | None = None
+        self.url = ""
+        self.status = "off"
+        self.error = ""
+        self.lines: deque[str] = deque(maxlen=20)
+        self._lock = threading.RLock()
+
+    def executable(self) -> Path:
+        return BIN_DIR / "cloudflared.exe"
+
+    def available(self) -> bool:
+        return self.executable().exists()
+
+    def start(self) -> str:
+        with self._lock:
+            if self.process and self.process.poll() is None and self.url and self.status == "online":
+                return self.url
+
+        last_error = ""
+        for _ in range(3):
+            self._launch()
+            candidate = self._wait_for_candidate(14)
+            if candidate and self._url_works(candidate, 24):
+                with self._lock:
+                    self.url = candidate
+                    self.status = "online"
+                    self.error = ""
+                return candidate
+            with self._lock:
+                last_error = self.error or "Public invite URL was not reachable yet."
+            self.stop()
+            time.sleep(1)
+
+        with self._lock:
+            self.status = "failed"
+            self.error = last_error
+        return ""
+
+    def _launch(self) -> None:
+        with self._lock:
+            self.stop()
+            self.url = ""
+            self.error = ""
+            self.status = "starting"
+            exe = self.executable()
+            if not exe.exists():
+                self.status = "missing"
+                self.error = "Cloudflare tunnel helper is missing."
+                return
+
+            creationflags = 0
+            startupinfo = None
+            if os.name == "nt":
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+            try:
+                self.process = subprocess.Popen(
+                    [
+                        str(exe),
+                        "tunnel",
+                        "--url",
+                        local_base_url(),
+                        "--no-autoupdate",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    creationflags=creationflags,
+                    startupinfo=startupinfo,
+                )
+            except Exception as exc:
+                self.status = "failed"
+                self.error = str(exc)[:180]
+                self.process = None
+                return
+
+            threading.Thread(target=self._read_output, name="BrotherhoodTunnel", daemon=True).start()
+
+    def _wait_for_candidate(self, timeout: float) -> str:
+        deadline = now_ts() + timeout
+        while now_ts() < deadline:
+            with self._lock:
+                if self.url:
+                    return self.url
+                if self.status in {"failed", "missing"}:
+                    return ""
+            time.sleep(0.2)
+        with self._lock:
+            self.error = "Timed out waiting for a public tunnel URL."
+        return ""
+
+    def _url_works(self, url: str, timeout: float) -> bool:
+        host = urlparse(url).hostname or ""
+        if not host:
+            return False
+        time.sleep(8)
+        deadline = now_ts() + timeout
+        while now_ts() < deadline:
+            try:
+                dns_url = f"https://cloudflare-dns.com/dns-query?name={quote(host)}&type=A"
+                req = Request(dns_url, headers={"Accept": "application/dns-json"})
+                with urlopen(req, timeout=5, context=ssl._create_unverified_context()) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+                if payload.get("Status") == 0 and payload.get("Answer"):
+                    return True
+            except Exception as exc:
+                with self._lock:
+                    self.error = str(exc)[:180]
+            time.sleep(1)
+        return False
+
+    def _read_output(self) -> None:
+        assert self.process is not None
+        pattern = re.compile(r"https://[A-Za-z0-9-]+\.trycloudflare\.com")
+        try:
+            assert self.process.stdout is not None
+            for line in self.process.stdout:
+                clean = line.strip()
+                if not clean:
+                    continue
+                with self._lock:
+                    self.lines.append(clean)
+                    match = pattern.search(clean)
+                    if match:
+                        self.url = match.group(0).rstrip("/")
+                        self.status = "checking"
+                        self.error = ""
+        except Exception as exc:
+            with self._lock:
+                self.error = str(exc)[:180]
+        finally:
+            code = self.process.poll() if self.process else None
+            with self._lock:
+                if not self.url and self.status != "off":
+                    self.status = "failed"
+                    if not self.error:
+                        self.error = f"Tunnel stopped before it was ready. Exit code: {code}"
+
+    def stop(self) -> None:
+        process = self.process
+        self.process = None
+        if process and process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=4)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+        self.url = ""
+        self.status = "off"
+        self.error = ""
+
+    def info(self) -> dict:
+        with self._lock:
+            return {
+                "available": self.available(),
+                "url": self.url,
+                "status": self.status,
+                "error": self.error,
+                "recent": list(self.lines)[-5:],
+            }
+
+
+def stop_public_tunnel() -> None:
+    manager = globals().get("TUNNEL_MANAGER")
+    if manager:
+        manager.stop()
+
+
 def is_local_relay(url: str) -> bool:
     parsed = urlparse(url or "")
     host = (parsed.hostname or "").lower()
@@ -317,6 +473,8 @@ def actor_payload(extra: dict | None = None) -> dict:
 
 def relay_url_for(path: str) -> str:
     settings = load_settings()
+    if settings.get("connection_mode") == "host":
+        return local_base_url() + path
     relay = normalize_relay_url(settings.get("relay_url"))
     if not relay:
         raise ValueError("Choose Host or Join first.")
@@ -351,11 +509,11 @@ def is_hosting_enabled(settings: dict | None = None) -> bool:
     return (
         settings.get("connection_mode") == "host"
         and bool(settings.get("hosting_enabled"))
-        and is_local_relay(settings.get("relay_url", ""))
     )
 
 
 def reset_connection_choice() -> None:
+    stop_public_tunnel()
     settings = load_settings()
     settings["connection_mode"] = ""
     settings["hosting_enabled"] = False
@@ -416,11 +574,17 @@ def relay_state_for(actor_id: str, actor_secret: str) -> tuple[int, dict]:
     ][-100:]
 
     posts = db.get("posts", [])[-100:]
+    post_ids = {post.get("id") for post in posts}
+    comments = [
+        item for item in db.get("comments", [])
+        if item.get("post_id") in post_ids
+    ][-300:]
 
     return 200, {
         "ok": True,
         "profiles": profiles,
         "posts": posts,
+        "comments": comments,
         "notes": related_notes,
         "requests": related_requests,
         "permissions": related_permissions,
@@ -461,55 +625,13 @@ def mask_app_name(name: str) -> str:
     return friendly[:40] or "Unknown"
 
 
-def mask_domain(domain: str) -> str:
-    domain = (domain or "").lower().strip(".")
-    if domain.startswith("www."):
-        domain = domain[4:]
-    if not domain:
-        return ""
-    if any(word in domain for word in SENSITIVE_DOMAIN_WORDS):
-        return "private site"
-    pieces = domain.split(".")
-    if len(pieces) > 3:
-        domain = ".".join(pieces[-3:])
-    return domain[:80]
-
-
-def is_private_host(host: str) -> bool:
-    host = (host or "").lower().strip("[]")
-    if not host or host == "localhost" or host == "::1" or host.startswith("127."):
-        return True
-    if host.startswith("10.") or host.startswith("192.168."):
-        return True
-    if host.startswith("172."):
-        parts = host.split(".")
-        if len(parts) >= 2 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
-            return True
-    return False
-
-
-def extract_domain(url: str) -> str:
-    try:
-        parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"}:
-            return ""
-        host = parsed.hostname or ""
-        if is_private_host(host):
-            return ""
-        return mask_domain(host)
-    except Exception:
-        return ""
-
-
 class ActivityTracker:
     def __init__(self) -> None:
         self.samples: deque[tuple[float, str]] = deque(maxlen=1000)
-        self.sites: dict[str, dict] = {}
         self.current_app = "Unknown"
         self.last_error = ""
         self._stop = threading.Event()
         self._last_publish = 0.0
-        self._last_site_scan = 0.0
         self._lock = threading.RLock()
 
     def start(self) -> None:
@@ -526,10 +648,6 @@ class ActivityTracker:
                     self.samples.append((now_ts(), app_name))
                     self._trim()
 
-                if now_ts() - self._last_site_scan > SITE_SCAN_SECONDS:
-                    self._last_site_scan = now_ts()
-                    self.scan_sites()
-
                 if now_ts() - self._last_publish > PUBLISH_SECONDS:
                     self._last_publish = now_ts()
                     self.publish()
@@ -541,21 +659,6 @@ class ActivityTracker:
         cutoff = now_ts() - 3600
         while self.samples and self.samples[0][0] < cutoff:
             self.samples.popleft()
-
-    def scan_sites(self) -> None:
-        domains = Counter()
-        last_seen: dict[str, float] = {}
-        for browser, path, kind in browser_history_files():
-            for domain, visited_at in read_recent_history(path, kind):
-                if not domain:
-                    continue
-                domains[domain] += 1
-                last_seen[domain] = max(last_seen.get(domain, 0), visited_at)
-        with self._lock:
-            self.sites = {
-                domain: {"domain": domain, "visits": count, "last_seen": last_seen.get(domain, 0)}
-                for domain, count in domains.most_common(12)
-            }
 
     def summary(self) -> dict:
         with self._lock:
@@ -571,14 +674,12 @@ class ActivityTracker:
                     "minutes": round(seconds / 60, 1),
                     "share": round(seconds / total_seconds, 3),
                 })
-            sites = sorted(self.sites.values(), key=lambda item: (-item["visits"], item["domain"]))[:10]
             return {
                 "updated_at": iso_now(),
                 "window_minutes": 60,
                 "current_app": self.current_app,
                 "apps": apps,
-                "sites": sites,
-                "privacy": "apps_domains_only",
+                "privacy": "apps_only",
                 "error": self.last_error,
             }
 
@@ -623,94 +724,8 @@ def get_foreground_app_name() -> str:
     return "Desktop"
 
 
-def browser_history_files() -> list[tuple[str, Path, str]]:
-    files: list[tuple[str, Path, str]] = []
-    local = Path(os.environ.get("LOCALAPPDATA", ""))
-    roaming = Path(os.environ.get("APPDATA", ""))
-    chromium_roots = [
-        ("Chrome", local / "Google" / "Chrome" / "User Data"),
-        ("Edge", local / "Microsoft" / "Edge" / "User Data"),
-        ("Brave", local / "BraveSoftware" / "Brave-Browser" / "User Data"),
-    ]
-    for browser, root in chromium_roots:
-        if not root.exists():
-            continue
-        for profile in root.iterdir():
-            if not profile.is_dir():
-                continue
-            if profile.name != "Default" and not profile.name.startswith("Profile"):
-                continue
-            history = profile / "History"
-            if history.exists():
-                files.append((browser, history, "chromium"))
-
-    firefox_root = roaming / "Mozilla" / "Firefox" / "Profiles"
-    if firefox_root.exists():
-        for profile in firefox_root.iterdir():
-            history = profile / "places.sqlite"
-            if history.exists():
-                files.append(("Firefox", history, "firefox"))
-    return files
-
-
-def read_recent_history(path: Path, kind: str) -> list[tuple[str, float]]:
-    copied = None
-    results: list[tuple[str, float]] = []
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".sqlite") as tmp:
-            copied = Path(tmp.name)
-        shutil.copy2(path, copied)
-        conn = sqlite3.connect(str(copied))
-        try:
-            cutoff_unix = now_ts() - 3600
-            if kind == "chromium":
-                cutoff = int((cutoff_unix + 11644473600) * 1_000_000)
-                rows = conn.execute(
-                    """
-                    SELECT urls.url, MAX(visits.visit_time)
-                    FROM urls
-                    JOIN visits ON urls.id = visits.url
-                    WHERE visits.visit_time >= ?
-                    GROUP BY urls.url
-                    LIMIT 500
-                    """,
-                    (cutoff,),
-                ).fetchall()
-                for url, visited in rows:
-                    domain = extract_domain(url)
-                    if domain:
-                        results.append((domain, (visited / 1_000_000) - 11644473600))
-            else:
-                cutoff = int(cutoff_unix * 1_000_000)
-                rows = conn.execute(
-                    """
-                    SELECT moz_places.url, MAX(moz_historyvisits.visit_date)
-                    FROM moz_places
-                    JOIN moz_historyvisits ON moz_places.id = moz_historyvisits.place_id
-                    WHERE moz_historyvisits.visit_date >= ?
-                    GROUP BY moz_places.url
-                    LIMIT 500
-                    """,
-                    (cutoff,),
-                ).fetchall()
-                for url, visited in rows:
-                    domain = extract_domain(url)
-                    if domain:
-                        results.append((domain, visited / 1_000_000))
-        finally:
-            conn.close()
-    except Exception:
-        return results
-    finally:
-        if copied:
-            try:
-                copied.unlink(missing_ok=True)
-            except OSError:
-                pass
-    return results
-
-
 TRACKER = ActivityTracker()
+TUNNEL_MANAGER = TunnelManager()
 
 
 class BrotherhoodHandler(BaseHTTPRequestHandler):
@@ -773,6 +788,10 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
             invite_urls = [f"http://{ip}:{SERVER_PORT}" for ip in sorted(LOCAL_IPS_CACHE) if not ip.startswith("127.")]
             host_circle_code = load_db().get("circle_code", "")
             host_active = is_hosting_enabled(settings)
+            tunnel_info = TUNNEL_MANAGER.info()
+            public_url = tunnel_info.get("url") if host_active else ""
+            if public_url:
+                relay = public_url
             payload = {
                 "ok": True,
                 "settings": {
@@ -787,9 +806,11 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
                     "share_activity": bool(settings.get("share_activity", True)),
                     "local_url": local_base_url(),
                     "invite_urls": invite_urls,
+                    "public_url": public_url,
                     "host_circle_code": host_circle_code,
                     "hosting_enabled": host_active,
                     "is_host": host_active,
+                    "tunnel": tunnel_info,
                 },
                 "local_activity": TRACKER.summary(),
             }
@@ -824,7 +845,12 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
                     settings["relay_url"] = local_base_url()
                     settings["circle_code"] = load_db().get("circle_code", "")
                     ensure_local_profile(settings)
+                    save_settings(settings)
+                    tunnel_url = TUNNEL_MANAGER.start()
+                    if tunnel_url:
+                        settings["relay_url"] = tunnel_url
                 else:
+                    stop_public_tunnel()
                     relay_url = normalize_relay_url(data.get("relay_url", ""))
                     if not relay_url:
                         raise ValueError("Relay URL is required.")
@@ -890,6 +916,15 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
                     "image": safe_post_image(data.get("image", "")),
                 })
                 result = relay_post("/relay/post", payload)
+                json_response(self, 200, result)
+                return
+
+            if parsed.path == "/api/comment":
+                payload = actor_payload({
+                    "post_id": clean_text(data.get("post_id", ""), 64),
+                    "text": clean_long_text(data.get("text", ""), 300),
+                })
+                result = relay_post("/relay/comment", payload)
                 json_response(self, 200, result)
                 return
 
@@ -965,6 +1000,9 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
             if parsed.path == "/relay/post":
                 self.relay_post_item(data)
                 return
+            if parsed.path == "/relay/comment":
+                self.relay_comment(data)
+                return
             if parsed.path == "/relay/note":
                 self.relay_note(data)
                 return
@@ -1037,6 +1075,27 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
             "created_at": iso_now(),
         })
         db["posts"] = db["posts"][-150:]
+        save_db(db)
+        status, payload = relay_state_for(actor_id, actor_secret)
+        json_response(self, status, payload)
+
+    def relay_comment(self, data: dict) -> None:
+        db = load_db()
+        actor_id, actor_secret = self.require_actor(db, data)
+        post_id = clean_text(data.get("post_id", ""), 64)
+        text = clean_long_text(data.get("text", ""), 300)
+        if not post_id or not any(post.get("id") == post_id for post in db.get("posts", [])):
+            raise ValueError("Choose a post.")
+        if not text:
+            raise ValueError("Write a comment first.")
+        db.setdefault("comments", []).append({
+            "id": uuid.uuid4().hex,
+            "post_id": post_id,
+            "author_id": actor_id,
+            "text": text,
+            "created_at": iso_now(),
+        })
+        db["comments"] = db["comments"][-400:]
         save_db(db)
         status, payload = relay_state_for(actor_id, actor_secret)
         json_response(self, status, payload)

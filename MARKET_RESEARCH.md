@@ -27,7 +27,7 @@ Core rules:
 - Consent first: activity is visible only after the owner allows that person.
 - Directional access: I can let you see mine without automatically seeing yours.
 - Revocable access: permission can be removed at any time.
-- Data minimization: share app names, rough time, and browser domains only. No screenshots, no full URLs, no search queries, no messages.
+- Data minimization: share app names and rough time only. No screenshots, no websites, no full URLs, no search queries, no messages.
 - Encouragement over replies: notes are designed to be received without pressure to answer.
 - Tiny group first: build for you and a few friends before thinking about a larger network.
 
@@ -39,5 +39,4 @@ Core rules:
 - Feed for things done and things to do, with optional image.
 - One-way encouragement notes.
 - Directional activity access requests and approvals.
-- Local Windows activity summaries: current app, app time in the last hour, and browser domains from recent history when available.
-
+- Local Windows activity summaries: current app and app time in the last hour.

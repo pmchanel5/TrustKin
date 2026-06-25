@@ -13,7 +13,7 @@ After that, each launch asks whether you want to `Host circle` or `Join circle`.
 ## Use it with friends
 
 1. One person chooses `Host circle`.
-2. Copy the Relay URL and Circle code from the app.
+2. Wait a few seconds for the public Relay URL to appear. It should usually be an `https://...trycloudflare.com` address.
 3. Each friend runs the same app on their own computer, chooses `Join circle`, and pastes those two values.
 4. For activity sharing, each person must ask and be allowed.
 
@@ -21,7 +21,7 @@ You can switch modes from the Connection panel. Switching from Host to Join stop
 
 Use `Close app` in the top bar to stop the local server and the app process.
 
-This MVP is best on the same Wi-Fi or a private VPN such as Tailscale or ZeroTier. If Windows Firewall asks, allow Python/Brotherhood on private networks.
+Distance hosting uses Cloudflare Quick Tunnel through the bundled `cloudflared.exe`. The public URL is temporary and changes whenever the host restarts the app. If the public URL does not appear, check that the host computer has internet access and that antivirus/firewall did not block `cloudflared.exe`.
 
 ## Privacy shape
 
@@ -31,9 +31,8 @@ It shares only:
 
 - active app names sampled roughly every 10 seconds
 - app time estimates for the last hour
-- browser domains visited in the last hour, when Chrome, Edge, Brave, or Firefox history can be read
 
-Some private apps and domains are masked as `Private app` or `private site`.
+It does not share websites or browser history. Chrome is shown only as `Chrome`, Discord as `Discord`, Steam as `Steam`, and Codex as `Codex`.
 
 ## Data
 
@@ -45,5 +44,6 @@ The host computer stores the shared circle data. This MVP is for trusted friends
 
 - No end-to-end encryption yet.
 - Friends need to run the app for their own activity to update.
-- The relay URL must be reachable from your friends' computers.
+- The host must keep Brotherhood open for friends to connect.
+- The public tunnel URL is temporary and should only be shared with trusted friends.
 - This is a prototype, not a hardened security product.

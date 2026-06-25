@@ -129,7 +129,7 @@ function render() {
 
 function renderSetup() {
   const settings = bootstrap.settings;
-  const inviteUrl = settings.invite_urls?.[0] || settings.local_url || "";
+  const inviteUrl = settings.public_url || settings.invite_urls?.[0] || settings.local_url || "";
   const circleCode = settings.host_circle_code || settings.circle_code || "";
   const hasProfile = Boolean(settings.has_profile);
   const profileName = settings.nickname || setupDraft.nickname || "";
@@ -297,10 +297,16 @@ function renderMain() {
 }
 
 function renderSidebar(settings, me) {
-  const hostUrl = settings.invite_urls?.[0] || settings.local_url || settings.relay_url;
+  const hostUrl = settings.public_url || settings.invite_urls?.[0] || settings.local_url || settings.relay_url;
   const relayField = settings.is_host ? hostUrl : settings.relay_url;
   const shownCode = settings.is_host ? settings.host_circle_code : settings.circle_code;
   const hostActive = settings.connection_mode === "host";
+  const tunnel = settings.tunnel || {};
+  const tunnelText = settings.public_url
+    ? "Internet invite ready"
+    : tunnel.available
+      ? `Internet invite ${tunnel.status || "starting"}`
+      : "Internet invite unavailable";
   return `
     <section class="panel">
       <div class="profile-card">
@@ -337,6 +343,7 @@ function renderSidebar(settings, me) {
             Relay URL
             <input value="${escapeHtml(relayField || "")}" readonly>
           </label>
+          <p class="muted small">${escapeHtml(tunnelText)}${tunnel.error ? `: ${escapeHtml(tunnel.error)}` : ""}</p>
           <label>
             Circle code
             <input value="${escapeHtml(shownCode || "")}" readonly>
@@ -400,6 +407,7 @@ function renderPost(post) {
   const author = profiles.get(post.author_id) || { nickname: "Brother" };
   const kind = post.kind === "plan" ? "To do" : "Done";
   const pillClass = post.kind === "plan" ? "amber" : "green";
+  const comments = (circle?.comments || []).filter((comment) => comment.post_id === post.id);
   return `
     <article class="post">
       <div class="post-head">
@@ -414,7 +422,28 @@ function renderPost(post) {
       </div>
       ${post.text ? `<p>${escapeHtml(post.text)}</p>` : ""}
       ${post.image ? `<img class="post-image" src="${post.image}" alt="">` : ""}
+      <div class="comment-list">
+        ${comments.length ? comments.map(renderComment).join("") : `<span class="muted small">No comments yet.</span>`}
+      </div>
+      <form class="comment-form" data-comment-form data-post-id="${escapeHtml(post.id)}">
+        <input name="comment" maxlength="300" placeholder="Comment">
+        <button type="submit">Send</button>
+      </form>
     </article>
+  `;
+}
+
+function renderComment(comment) {
+  const profiles = profileMap();
+  const author = profiles.get(comment.author_id) || { nickname: "Brother" };
+  return `
+    <div class="comment">
+      ${avatarHtml(author)}
+      <div>
+        <div><strong>${escapeHtml(author.nickname)}</strong> <span class="muted small">${timeAgo(comment.created_at)}</span></div>
+        <p>${escapeHtml(comment.text)}</p>
+      </div>
+    </div>
   `;
 }
 
@@ -487,7 +516,6 @@ function renderActivityCard(profile) {
 function renderActivitySummary(activity) {
   if (activity.paused) return `<div class="empty">Activity sharing is paused.</div>`;
   const apps = activity.apps || [];
-  const sites = activity.sites || [];
   return `
     <div>
       <span class="pill">${escapeHtml(activity.current_app || "Desktop")}</span>
@@ -499,9 +527,6 @@ function renderActivitySummary(activity) {
             <span class="muted small">${escapeHtml(item.minutes)}m</span>
           </div>
         `).join("") : `<div class="muted small">No app samples yet.</div>`}
-      </div>
-      <div class="site-list">
-        ${sites.length ? sites.map((site) => `<span class="pill">${escapeHtml(site.domain)} - ${site.visits}</span>`).join("") : `<span class="muted small">No browser domains in the last hour.</span>`}
       </div>
     </div>
   `;
@@ -705,6 +730,22 @@ function wireDashboard() {
     } catch (error) {
       showToast(error.message);
     }
+  });
+
+  document.querySelectorAll("[data-comment-form]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const input = form.querySelector('input[name="comment"]');
+      try {
+        circle = await api("/api/comment", {
+          post_id: form.dataset.postId,
+          text: input?.value || "",
+        });
+        renderDashboard();
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
   });
 
   document.querySelector('[data-action="clear-post-image"]')?.addEventListener("click", () => {
