@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import ctypes
 import ctypes.wintypes
 import hashlib
+import hmac
+import io
 import json
 import mimetypes
 import os
 import re
 import secrets
 import socket
-import ssl
 import subprocess
 import sys
 import threading
@@ -23,12 +26,42 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 
+try:
+    from PIL import Image, ImageOps, UnidentifiedImageError
+    PIL_AVAILABLE = True
+except ImportError:
+    Image = None
+    ImageOps = None
+    UnidentifiedImageError = OSError
+    PIL_AVAILABLE = False
+
 
 APP_NAME = "Brotherhood"
 DEFAULT_PORT = 8765
+DEFAULT_RELAY_PORT = 8766
 MAX_BODY_BYTES = 900_000
 SAMPLE_SECONDS = 10
 PUBLISH_SECONDS = 20
+INVITE_TOKEN_TTL_SECONDS = 24 * 60 * 60
+INVITE_MAX_USES = 3
+JOIN_RATE_WINDOW_SECONDS = 60
+JOIN_RATE_LIMIT_PER_SOURCE = 5
+JOIN_RATE_LIMIT_GLOBAL = 30
+JOIN_FAILURE_WINDOW_SECONDS = 5 * 60
+JOIN_FAILURE_LOCK_SECONDS = 5 * 60
+JOIN_FAILURE_LOCK_THRESHOLD = 10
+MAX_IMAGE_PIXELS = 4_000_000
+IMAGE_DATA_URL_RE = re.compile(r"^data:image/(jpeg|jpg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$")
+INVITE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
+PROFILE_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+CSP_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'none'; "
+    "img-src 'self' data: blob:; "
+    "connect-src 'self'"
+)
 
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     BASE_DIR = Path(sys._MEIPASS)
@@ -37,14 +70,33 @@ else:
 
 WEB_DIR = BASE_DIR / "web"
 BIN_DIR = BASE_DIR / "bin"
-DATA_DIR = Path(os.environ.get("APPDATA", str(BASE_DIR))) / "BrotherhoodMVP"
+DATA_DIR = Path(
+    os.environ.get(
+        "BROTHERHOOD_DATA_DIR",
+        str(Path(os.environ.get("APPDATA", str(BASE_DIR))) / "BrotherhoodMVP"),
+    )
+)
 DB_PATH = DATA_DIR / "circle.json"
 SETTINGS_PATH = DATA_DIR / "local_settings.json"
 
 SERVER_PORT = DEFAULT_PORT
+RELAY_PORT = DEFAULT_RELAY_PORT
 LOCAL_IPS_CACHE: set[str] = set()
 DB_LOCK = threading.RLock()
 SETTINGS_LOCK = threading.RLock()
+INVITE_LOCK = threading.RLock()
+JOIN_RATE_LOCK = threading.RLock()
+CURRENT_INVITE_TOKEN = ""
+JOIN_ATTEMPTS_BY_SOURCE: dict[str, deque[float]] = {}
+JOIN_ATTEMPTS_GLOBAL: deque[float] = deque()
+
+if PIL_AVAILABLE:
+    Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+IMAGE_VERIFY_ERRORS = (
+    (binascii.Error, OSError, UnidentifiedImageError, Image.DecompressionBombError)
+    if PIL_AVAILABLE
+    else (binascii.Error, OSError)
+)
 
 
 SENSITIVE_APP_WORDS = {
@@ -113,9 +165,22 @@ def write_json(path: Path, data) -> None:
     tmp.replace(path)
 
 
+def default_invite_record() -> dict:
+    return {
+        "hash": "",
+        "created_at": "",
+        "expires_at": 0.0,
+        "uses": 0,
+        "max_uses": INVITE_MAX_USES,
+        "disabled_until": 0.0,
+        "failures": [],
+    }
+
+
 def default_db() -> dict:
     return {
-        "circle_code": secrets.token_hex(3).upper(),
+        "circle_code": "",
+        "invite": default_invite_record(),
         "created_at": iso_now(),
         "profiles": {},
         "user_secrets": {},
@@ -137,6 +202,14 @@ def load_db() -> dict:
             if key not in db:
                 db[key] = value
                 changed = True
+        if not isinstance(db.get("invite"), dict):
+            db["invite"] = default_invite_record()
+            changed = True
+        else:
+            for key, value in default_invite_record().items():
+                if key not in db["invite"]:
+                    db["invite"][key] = value
+                    changed = True
         if changed:
             write_json(DB_PATH, db)
         return db
@@ -153,10 +226,12 @@ def default_settings() -> dict:
         "user_secret": "",
         "relay_url": "",
         "circle_code": "",
+        "invite_token": "",
         "connection_mode": "",
         "hosting_enabled": False,
         "share_activity": True,
         "local_port": DEFAULT_PORT,
+        "relay_port": DEFAULT_RELAY_PORT,
         "nickname": "",
         "avatar": "",
     }
@@ -188,6 +263,12 @@ def hash_secret(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
+def send_security_headers(handler: BaseHTTPRequestHandler) -> None:
+    handler.send_header("Content-Security-Policy", CSP_POLICY)
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Referrer-Policy", "no-referrer")
+
+
 def clean_text(value: str, limit: int) -> str:
     return " ".join(str(value or "").strip().split())[:limit]
 
@@ -202,6 +283,7 @@ def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) -
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
     handler.send_header("Cache-Control", "no-store")
+    send_security_headers(handler)
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -227,6 +309,43 @@ def normalize_relay_url(value: str) -> str:
 
 def local_base_url() -> str:
     return f"http://127.0.0.1:{SERVER_PORT}"
+
+
+def local_relay_base_url() -> str:
+    return f"http://127.0.0.1:{RELAY_PORT}"
+
+
+def clean_invite_token(value: str) -> str:
+    token = str(value or "").strip()
+    if not token:
+        return ""
+    if not INVITE_TOKEN_RE.fullmatch(token):
+        raise ValueError("Invite token is invalid.")
+    return token
+
+
+def split_invite_fields(relay_or_invite_url: str, token_value: str = "") -> tuple[str, str]:
+    raw = str(relay_or_invite_url or "").strip()
+    token = str(token_value or "").strip()
+    if raw:
+        parsed_raw = raw if raw.startswith(("http://", "https://")) else "http://" + raw
+        parsed = urlparse(parsed_raw)
+        fragment_token = (parse_qs(parsed.fragment).get("token") or [""])[0]
+        query_token = (parse_qs(parsed.query).get("token") or [""])[0]
+        token = token or fragment_token or query_token
+        path = parsed.path.rstrip("/")
+        if path == "/join":
+            path = ""
+        relay_url = f"{parsed.scheme}://{parsed.netloc}{path}".rstrip("/")
+    else:
+        relay_url = ""
+    return normalize_relay_url(relay_url), clean_invite_token(token)
+
+
+def invite_url_for(relay_base_url: str, token: str) -> str:
+    if not relay_base_url or not token:
+        return ""
+    return f"{normalize_relay_url(relay_base_url)}/join#token={quote(token)}"
 
 
 class TunnelManager:
@@ -269,6 +388,16 @@ class TunnelManager:
             self.error = last_error
         return ""
 
+    def start_async(self) -> None:
+        with self._lock:
+            if self.status in {"starting", "checking"}:
+                return
+            if self.process and self.process.poll() is None and self.status == "online":
+                return
+            self.status = "starting"
+            self.error = ""
+        threading.Thread(target=self.start, name="BrotherhoodTunnelStart", daemon=True).start()
+
     def _launch(self) -> None:
         with self._lock:
             self.stop()
@@ -294,7 +423,7 @@ class TunnelManager:
                         str(exe),
                         "tunnel",
                         "--url",
-                        local_base_url(),
+                        local_relay_base_url(),
                         "--no-autoupdate",
                     ],
                     stdout=subprocess.PIPE,
@@ -328,18 +457,16 @@ class TunnelManager:
         return ""
 
     def _url_works(self, url: str, timeout: float) -> bool:
-        host = urlparse(url).hostname or ""
-        if not host:
+        if not (urlparse(url).hostname or ""):
             return False
-        time.sleep(8)
         deadline = now_ts() + timeout
+        health_url = normalize_relay_url(url) + "/relay/ping"
         while now_ts() < deadline:
             try:
-                dns_url = f"https://cloudflare-dns.com/dns-query?name={quote(host)}&type=A"
-                req = Request(dns_url, headers={"Accept": "application/dns-json"})
-                with urlopen(req, timeout=5, context=ssl._create_unverified_context()) as resp:
+                req = Request(health_url, headers={"Accept": "application/json"})
+                with urlopen(req, timeout=5) as resp:
                     payload = json.loads(resp.read().decode("utf-8"))
-                if payload.get("Status") == 0 and payload.get("Answer"):
+                if resp.status == 200 and payload.get("ok") is True and payload.get("app") == APP_NAME:
                     return True
             except Exception as exc:
                 with self._lock:
@@ -411,7 +538,7 @@ def is_local_relay(url: str) -> bool:
     parsed = urlparse(url or "")
     host = (parsed.hostname or "").lower()
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    if port != SERVER_PORT:
+    if port != RELAY_PORT:
         return False
     return host in {"127.0.0.1", "localhost", "::1"} or host in LOCAL_IPS_CACHE
 
@@ -458,6 +585,105 @@ def make_request(url: str, method: str = "GET", data: dict | None = None, timeou
     return json.loads(raw.decode("utf-8"))
 
 
+def invite_is_usable(invite: dict) -> bool:
+    return (
+        bool(invite.get("hash"))
+        and float(invite.get("expires_at", 0) or 0) > now_ts()
+        and int(invite.get("uses", 0) or 0) < int(invite.get("max_uses", INVITE_MAX_USES) or INVITE_MAX_USES)
+        and float(invite.get("disabled_until", 0) or 0) <= now_ts()
+    )
+
+
+def rotate_invite_token() -> str:
+    global CURRENT_INVITE_TOKEN
+    token = secrets.token_urlsafe(32)
+    db = load_db()
+    db["invite"] = {
+        **default_invite_record(),
+        "hash": hash_secret(token),
+        "created_at": iso_now(),
+        "expires_at": now_ts() + INVITE_TOKEN_TTL_SECONDS,
+        "max_uses": INVITE_MAX_USES,
+    }
+    save_db(db)
+    with INVITE_LOCK:
+        CURRENT_INVITE_TOKEN = token
+    return token
+
+
+def current_invite_token() -> str:
+    with INVITE_LOCK:
+        token = CURRENT_INVITE_TOKEN
+    db = load_db()
+    invite = db.get("invite", {})
+    if float(invite.get("disabled_until", 0) or 0) > now_ts():
+        return ""
+    if token and invite_is_usable(invite) and hmac.compare_digest(invite.get("hash", ""), hash_secret(token)):
+        return token
+    return rotate_invite_token()
+
+
+def source_key_for(handler: BaseHTTPRequestHandler) -> str:
+    for header in ("CF-Connecting-IP", "X-Forwarded-For"):
+        value = (handler.headers.get(header, "") or "").split(",")[0].strip()
+        if value:
+            return value[:80]
+    return str(handler.client_address[0])[:80]
+
+
+def prune_deque(values: deque[float], window_seconds: int) -> None:
+    cutoff = now_ts() - window_seconds
+    while values and values[0] < cutoff:
+        values.popleft()
+
+
+def check_join_rate_limit(source: str, db: dict) -> None:
+    disabled_until = float(db.get("invite", {}).get("disabled_until", 0) or 0)
+    if disabled_until > now_ts():
+        raise ValueError("Invite is temporarily locked. Try again in a few minutes.")
+
+    with JOIN_RATE_LOCK:
+        prune_deque(JOIN_ATTEMPTS_GLOBAL, JOIN_RATE_WINDOW_SECONDS)
+        source_attempts = JOIN_ATTEMPTS_BY_SOURCE.setdefault(source, deque())
+        prune_deque(source_attempts, JOIN_RATE_WINDOW_SECONDS)
+        if len(source_attempts) >= JOIN_RATE_LIMIT_PER_SOURCE or len(JOIN_ATTEMPTS_GLOBAL) >= JOIN_RATE_LIMIT_GLOBAL:
+            raise ValueError("Too many join attempts. Try again in a minute.")
+        source_attempts.append(now_ts())
+        JOIN_ATTEMPTS_GLOBAL.append(now_ts())
+
+
+def record_failed_join(db: dict, source: str) -> None:
+    invite = db.setdefault("invite", default_invite_record())
+    failures = [
+        item for item in invite.get("failures", [])
+        if float(item.get("at", 0) or 0) >= now_ts() - JOIN_FAILURE_WINDOW_SECONDS
+    ]
+    failures.append({"at": now_ts(), "source": source[:80]})
+    invite["failures"] = failures[-50:]
+    if len(failures) >= JOIN_FAILURE_LOCK_THRESHOLD:
+        invite["disabled_until"] = now_ts() + JOIN_FAILURE_LOCK_SECONDS
+
+
+def consume_invite_token(db: dict, token: str, source: str) -> None:
+    check_join_rate_limit(source, db)
+    invite = db.setdefault("invite", default_invite_record())
+    expected_hash = str(invite.get("hash", ""))
+    token_hash = hash_secret(token or "")
+    if not invite_is_usable(invite) or not hmac.compare_digest(expected_hash, token_hash):
+        record_failed_join(db, source)
+        save_db(db)
+        raise ValueError("Invite token is invalid or expired.")
+    invite["uses"] = int(invite.get("uses", 0) or 0) + 1
+    invite["failures"] = []
+
+
+def clean_profile_id(value: str) -> str:
+    user_id = clean_text(value, 64).lower()
+    if not PROFILE_ID_RE.fullmatch(user_id):
+        raise ValueError("Profile id is invalid.")
+    return user_id
+
+
 def actor_payload(extra: dict | None = None) -> dict:
     settings = load_settings()
     if not settings.get("user_id"):
@@ -474,7 +700,7 @@ def actor_payload(extra: dict | None = None) -> dict:
 def relay_url_for(path: str) -> str:
     settings = load_settings()
     if settings.get("connection_mode") == "host":
-        return local_base_url() + path
+        return local_relay_base_url() + path
     relay = normalize_relay_url(settings.get("relay_url"))
     if not relay:
         raise ValueError("Choose Host or Join first.")
@@ -514,11 +740,15 @@ def is_hosting_enabled(settings: dict | None = None) -> bool:
 
 def reset_connection_choice() -> None:
     stop_public_tunnel()
+    global CURRENT_INVITE_TOKEN
+    with INVITE_LOCK:
+        CURRENT_INVITE_TOKEN = ""
     settings = load_settings()
     settings["connection_mode"] = ""
     settings["hosting_enabled"] = False
     settings["relay_url"] = ""
     settings["circle_code"] = ""
+    settings["invite_token"] = ""
     save_settings(settings)
 
 
@@ -593,26 +823,51 @@ def relay_state_for(actor_id: str, actor_secret: str) -> tuple[int, dict]:
     }
 
 
-def safe_avatar(value: str) -> str:
+def sanitize_image_data_url(value: str, max_input_chars: int, max_dimension: int, quality: int) -> str:
     value = str(value or "")
     if not value:
         return ""
-    if len(value) > 550_000:
-        raise ValueError("Profile image is too large.")
-    if not value.startswith("data:image/"):
-        raise ValueError("Profile image must be an image.")
-    return value
+    if not PIL_AVAILABLE or Image is None or ImageOps is None:
+        raise ValueError("Image uploads require Pillow to be installed.")
+    if len(value) > max_input_chars:
+        raise ValueError("Image is too large.")
+    match = IMAGE_DATA_URL_RE.fullmatch(value)
+    if not match:
+        raise ValueError("Image must be a PNG, JPEG, or WebP data URL.")
+    try:
+        raw = base64.b64decode(match.group(2), validate=True)
+        with Image.open(io.BytesIO(raw)) as image:
+            if image.format not in {"JPEG", "PNG", "WEBP"}:
+                raise ValueError("Image must be a PNG, JPEG, or WebP file.")
+            image.load()
+            image = ImageOps.exif_transpose(image)
+            image.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+            if image.mode not in {"RGB", "L"}:
+                background = Image.new("RGB", image.size, (255, 255, 255))
+                if image.mode in {"RGBA", "LA"}:
+                    background.paste(image, mask=image.getchannel("A"))
+                else:
+                    background.paste(image.convert("RGB"))
+                image = background
+            else:
+                image = image.convert("RGB")
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=quality, optimize=True)
+    except IMAGE_VERIFY_ERRORS as exc:
+        raise ValueError("Image could not be verified.") from exc
+    encoded = base64.b64encode(output.getvalue()).decode("ascii")
+    result = f"data:image/jpeg;base64,{encoded}"
+    if len(result) > max_input_chars:
+        raise ValueError("Image is too large.")
+    return result
+
+
+def safe_avatar(value: str) -> str:
+    return sanitize_image_data_url(value, 550_000, 512, 84)
 
 
 def safe_post_image(value: str) -> str:
-    value = str(value or "")
-    if not value:
-        return ""
-    if len(value) > 700_000:
-        raise ValueError("Post image is too large.")
-    if not value.startswith("data:image/"):
-        raise ValueError("Post image must be an image.")
-    return value
+    return sanitize_image_data_url(value, 700_000, 1400, 82)
 
 
 def mask_app_name(name: str) -> str:
@@ -730,6 +985,7 @@ TUNNEL_MANAGER = TunnelManager()
 
 class BrotherhoodHandler(BaseHTTPRequestHandler):
     server_version = "BrotherhoodMVP/0.1"
+    public_relay_server = False
 
     def log_message(self, format: str, *args) -> None:
         return
@@ -778,6 +1034,7 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        send_security_headers(self)
         self.end_headers()
         self.wfile.write(data)
 
@@ -785,13 +1042,16 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/bootstrap":
             settings = load_settings()
             relay = normalize_relay_url(settings.get("relay_url"))
-            invite_urls = [f"http://{ip}:{SERVER_PORT}" for ip in sorted(LOCAL_IPS_CACHE) if not ip.startswith("127.")]
-            host_circle_code = load_db().get("circle_code", "")
             host_active = is_hosting_enabled(settings)
             tunnel_info = TUNNEL_MANAGER.info()
             public_url = tunnel_info.get("url") if host_active else ""
+            host_invite_token = current_invite_token() if host_active else ""
+            host_relay_url = public_url or (local_relay_base_url() if host_active else "")
+            host_invite_url = invite_url_for(host_relay_url, host_invite_token)
             if public_url:
                 relay = public_url
+            elif host_active:
+                relay = local_relay_base_url()
             payload = {
                 "ok": True,
                 "settings": {
@@ -802,12 +1062,15 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
                     "connection_mode": settings.get("connection_mode", ""),
                     "needs_connection": not bool(settings.get("connection_mode")),
                     "relay_url": relay,
-                    "circle_code": settings.get("circle_code", ""),
+                    "circle_code": "",
+                    "invite_token": "" if host_active else settings.get("invite_token", ""),
                     "share_activity": bool(settings.get("share_activity", True)),
                     "local_url": local_base_url(),
-                    "invite_urls": invite_urls,
+                    "local_relay_url": local_relay_base_url(),
+                    "invite_urls": [],
                     "public_url": public_url,
-                    "host_circle_code": host_circle_code,
+                    "host_circle_code": "",
+                    "host_invite_url": host_invite_url,
                     "hosting_enabled": host_active,
                     "is_host": host_active,
                     "tunnel": tunnel_info,
@@ -821,11 +1084,7 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
                 settings = load_settings()
                 if not settings.get("connection_mode"):
                     raise ValueError("Choose Host or Join first.")
-                query = (
-                    f"?actor_id={settings.get('user_id', '')}"
-                    f"&actor_secret={settings.get('user_secret', '')}"
-                )
-                state = relay_get("/relay/state" + query)
+                state = relay_post("/relay/state", actor_payload())
                 state["local_activity"] = TRACKER.summary()
                 json_response(self, 200, state)
             except Exception as exc:
@@ -840,24 +1099,30 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
                 settings = load_settings()
                 mode = data.get("mode", "host")
                 if mode == "host":
+                    current_invite_token()
                     settings["connection_mode"] = "host"
                     settings["hosting_enabled"] = True
-                    settings["relay_url"] = local_base_url()
-                    settings["circle_code"] = load_db().get("circle_code", "")
+                    settings["relay_url"] = local_relay_base_url()
+                    settings["circle_code"] = ""
+                    settings["invite_token"] = ""
                     ensure_local_profile(settings)
                     save_settings(settings)
-                    tunnel_url = TUNNEL_MANAGER.start()
-                    if tunnel_url:
-                        settings["relay_url"] = tunnel_url
+                    TUNNEL_MANAGER.start_async()
                 else:
                     stop_public_tunnel()
-                    relay_url = normalize_relay_url(data.get("relay_url", ""))
+                    relay_url, invite_token = split_invite_fields(
+                        data.get("invite_url") or data.get("relay_url", ""),
+                        data.get("invite_token") or data.get("circle_code", ""),
+                    )
                     if not relay_url:
-                        raise ValueError("Relay URL is required.")
+                        raise ValueError("Invite URL is required.")
+                    if not invite_token:
+                        raise ValueError("Invite token is required.")
                     settings["connection_mode"] = "join"
                     settings["hosting_enabled"] = False
                     settings["relay_url"] = relay_url
-                    settings["circle_code"] = clean_text(data.get("circle_code", ""), 20).upper()
+                    settings["circle_code"] = ""
+                    settings["invite_token"] = invite_token
                 if "share_activity" in data:
                     settings["share_activity"] = bool(data.get("share_activity"))
                 save_settings(settings)
@@ -887,13 +1152,20 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
                 payload = {
                     "user_id": settings["user_id"],
                     "user_secret": settings["user_secret"],
-                    "circle_code": settings.get("circle_code", ""),
+                    "invite_token": settings.get("invite_token", ""),
                     "nickname": settings["nickname"],
                     "avatar": settings["avatar"],
                 }
                 if not payload["nickname"]:
                     raise ValueError("Nickname is required.")
-                result = relay_post("/relay/profile", payload)
+                if settings.get("connection_mode") == "host" and settings.get("hosting_enabled"):
+                    ensure_local_profile(settings)
+                    status, result = relay_state_for(settings["user_id"], settings["user_secret"])
+                    if status >= 400:
+                        json_response(self, status, result)
+                        return
+                else:
+                    result = relay_post("/relay/profile", payload)
                 json_response(self, 200, result)
                 return
 
@@ -980,11 +1252,7 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
             })
             return
         if parsed.path == "/relay/state":
-            params = parse_qs(parsed.query)
-            actor_id = (params.get("actor_id") or [""])[0]
-            actor_secret = (params.get("actor_secret") or [""])[0]
-            status, payload = relay_state_for(actor_id, actor_secret)
-            json_response(self, status, payload)
+            json_response(self, 405, {"ok": False, "error": "Use POST for relay state."})
             return
         json_response(self, 404, {"ok": False, "error": "Not found."})
 
@@ -994,6 +1262,12 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
             return
         try:
             data = read_json_body(self)
+            if parsed.path == "/relay/state":
+                db = load_db()
+                actor_id, actor_secret = self.require_actor(db, data)
+                status, payload = relay_state_for(actor_id, actor_secret)
+                json_response(self, status, payload)
+                return
             if parsed.path == "/relay/profile":
                 self.relay_profile(data)
                 return
@@ -1024,7 +1298,7 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
 
     def relay_profile(self, data: dict) -> None:
         db = load_db()
-        user_id = clean_text(data.get("user_id", ""), 64)
+        user_id = clean_profile_id(data.get("user_id", ""))
         user_secret = str(data.get("user_secret", ""))
         nickname = clean_text(data.get("nickname", ""), 32)
         avatar = safe_avatar(data.get("avatar", ""))
@@ -1032,8 +1306,9 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
             raise ValueError("Nickname is required.")
 
         exists = user_id in db["profiles"]
-        if not exists and clean_text(data.get("circle_code", ""), 20).upper() != db.get("circle_code", ""):
-            raise ValueError("Circle code is wrong.")
+        if not exists:
+            invite_token = clean_invite_token(data.get("invite_token", ""))
+            consume_invite_token(db, invite_token, source_key_for(self))
         if exists and not verify_actor(db, user_id, user_secret):
             json_response(self, 403, {"ok": False, "error": "Profile secret does not match."})
             return
@@ -1195,15 +1470,37 @@ class BrotherhoodHandler(BaseHTTPRequestHandler):
         json_response(self, 200, {"ok": True})
 
 
-def choose_port() -> int:
+class RelayOnlyHandler(BrotherhoodHandler):
+    public_relay_server = True
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        if not parsed.path.startswith("/relay/"):
+            json_response(self, 404, {"ok": False, "error": "Not found."})
+            return
+        self.handle_relay_get(parsed)
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if not parsed.path.startswith("/relay/"):
+            json_response(self, 404, {"ok": False, "error": "Not found."})
+            return
+        self.handle_relay_post(parsed)
+
+
+def choose_port(bind_host: str, start_port: int, settings_key: str | None = None, avoid: set[int] | None = None) -> int:
     settings = load_settings()
-    start = int(settings.get("local_port", DEFAULT_PORT) or DEFAULT_PORT)
-    for port in list(range(start, start + 20)) + list(range(DEFAULT_PORT, DEFAULT_PORT + 20)):
+    start = int(settings.get(settings_key, start_port) or start_port) if settings_key else start_port
+    avoid = avoid or set()
+    for port in list(range(start, start + 20)) + list(range(start_port, start_port + 20)):
+        if port in avoid:
+            continue
         try:
-            server = ThreadingHTTPServer(("0.0.0.0", port), BrotherhoodHandler)
+            server = ThreadingHTTPServer((bind_host, port), BrotherhoodHandler)
             server.server_close()
-            settings["local_port"] = port
-            save_settings(settings)
+            if settings_key:
+                settings[settings_key] = port
+                save_settings(settings)
             return port
         except OSError:
             continue
@@ -1211,24 +1508,23 @@ def choose_port() -> int:
 
 
 def main() -> None:
-    global SERVER_PORT, LOCAL_IPS_CACHE
+    global SERVER_PORT, RELAY_PORT, LOCAL_IPS_CACHE
     ensure_data_dir()
     load_db()
     load_settings()
     reset_connection_choice()
-    SERVER_PORT = choose_port()
+    SERVER_PORT = choose_port("127.0.0.1", DEFAULT_PORT, "local_port")
+    RELAY_PORT = choose_port("127.0.0.1", DEFAULT_RELAY_PORT, "relay_port", {SERVER_PORT})
     LOCAL_IPS_CACHE = get_local_ips()
-    settings = load_settings()
-    if is_hosting_enabled(settings):
-        settings["relay_url"] = local_base_url()
-        if not settings.get("circle_code"):
-            settings["circle_code"] = load_db().get("circle_code", "")
-        save_settings(settings)
 
     TRACKER.start()
-    server = ThreadingHTTPServer(("0.0.0.0", SERVER_PORT), BrotherhoodHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", SERVER_PORT), BrotherhoodHandler)
+    relay_server = ThreadingHTTPServer(("127.0.0.1", RELAY_PORT), RelayOnlyHandler)
+    relay_thread = threading.Thread(target=relay_server.serve_forever, name="BrotherhoodRelay", daemon=True)
+    relay_thread.start()
     url = local_base_url()
     print(f"Brotherhood is running at {url}")
+    print(f"Brotherhood relay is running at {local_relay_base_url()}")
     print(f"Local data: {DATA_DIR}")
     if "--no-open" not in sys.argv:
         threading.Timer(0.7, lambda: webbrowser.open(url)).start()
@@ -1239,6 +1535,8 @@ def main() -> None:
     finally:
         reset_connection_choice()
         server.server_close()
+        relay_server.shutdown()
+        relay_server.server_close()
 
 
 if __name__ == "__main__":

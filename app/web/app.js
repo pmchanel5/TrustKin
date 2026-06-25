@@ -6,10 +6,11 @@ let circle = null;
 let activeTab = "feed";
 let setupMode = "host";
 let setupAvatar = "";
-let setupDraft = { nickname: "", relay_url: "", circle_code: "" };
+let setupDraft = { nickname: "", relay_url: "", invite_token: "" };
 let postImage = "";
 let lastError = "";
 let refreshTimer = null;
+const SAFE_IMAGE_RE = /^data:image\/(?:jpeg|jpg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
 
 const noteStarters = [
   "You can do it. One clean step now.",
@@ -41,7 +42,7 @@ async function api(path, body) {
 async function loadBootstrap() {
   bootstrap = await api("/api/bootstrap");
   setupDraft.relay_url = bootstrap.settings.relay_url || "";
-  setupDraft.circle_code = bootstrap.settings.circle_code || "";
+  setupDraft.invite_token = bootstrap.settings.invite_token || "";
   if (bootstrap.settings.connection_mode) setupMode = bootstrap.settings.connection_mode;
 }
 
@@ -78,6 +79,28 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function safeImageSrc(value) {
+  const src = String(value || "");
+  return SAFE_IMAGE_RE.test(src) ? src : "";
+}
+
+function parseInviteValue(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return { relayUrl: "", token: "" };
+  try {
+    const url = new URL(raw.includes("://") ? raw : `http://${raw}`);
+    const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
+    const query = new URLSearchParams(url.search);
+    const token = hash.get("token") || query.get("token") || "";
+    if (url.pathname.replace(/\/+$/, "") === "/join") url.pathname = "";
+    url.hash = "";
+    url.search = "";
+    return { relayUrl: url.toString().replace(/\/$/, ""), token };
+  } catch {
+    return { relayUrl: raw, token: "" };
+  }
+}
+
 function initials(name) {
   const parts = String(name || "B").trim().split(/\s+/).filter(Boolean);
   return (parts[0]?.[0] || "B").toUpperCase() + (parts[1]?.[0] || "").toUpperCase();
@@ -85,8 +108,9 @@ function initials(name) {
 
 function avatarHtml(profile, className = "avatar") {
   const nick = profile?.nickname || "Brother";
-  if (profile?.avatar) {
-    return `<span class="${className}"><img src="${profile.avatar}" alt=""></span>`;
+  const avatar = safeImageSrc(profile?.avatar);
+  if (avatar) {
+    return `<span class="${className}"><img src="${escapeHtml(avatar)}" alt=""></span>`;
   }
   return `<span class="${className}">${escapeHtml(initials(nick))}</span>`;
 }
@@ -129,11 +153,10 @@ function render() {
 
 function renderSetup() {
   const settings = bootstrap.settings;
-  const inviteUrl = settings.public_url || settings.invite_urls?.[0] || settings.local_url || "";
-  const circleCode = settings.host_circle_code || settings.circle_code || "";
+  const inviteUrl = settings.host_invite_url || "";
   const hasProfile = Boolean(settings.has_profile);
   const profileName = settings.nickname || setupDraft.nickname || "";
-  const profileAvatar = setupAvatar || settings.avatar || "";
+  const profileAvatar = safeImageSrc(setupAvatar || settings.avatar || "");
   app.innerHTML = `
     <main class="setup-wrap">
       <section class="setup">
@@ -158,7 +181,7 @@ function renderSetup() {
               </div>
             ` : `
               <div class="avatar-row">
-                <span id="setupAvatarPreview">${profileAvatar ? `<span class="avatar-large"><img src="${profileAvatar}" alt=""></span>` : `<span class="avatar-large">BH</span>`}</span>
+                <span id="setupAvatarPreview">${profileAvatar ? `<span class="avatar-large"><img src="${escapeHtml(profileAvatar)}" alt=""></span>` : `<span class="avatar-large">BH</span>`}</span>
                 <label>
                   Profile image
                   <input id="setupAvatarInput" type="file" accept="image/*">
@@ -178,27 +201,20 @@ function renderSetup() {
             <div id="hostFields" class="${setupMode === "host" ? "" : "hidden"}">
               <div class="copy-row">
                 <label>
-                  Relay URL
+                  Invite URL
                   <input value="${escapeHtml(inviteUrl)}" readonly>
                 </label>
                 <button type="button" data-copy="${escapeHtml(inviteUrl)}">Copy</button>
               </div>
-              <div class="copy-row">
-                <label>
-                  Circle code
-                  <input value="${escapeHtml(circleCode)}" readonly>
-                </label>
-                <button type="button" data-copy="${escapeHtml(circleCode)}">Copy</button>
-              </div>
             </div>
             <div id="joinFields" class="join-fields ${setupMode === "join" ? "" : "hidden"}">
               <label>
-                Relay URL
-                <input id="setupRelay" placeholder="http://192.168.1.10:8765" value="${escapeHtml(setupDraft.relay_url)}">
+                Invite URL
+                <input id="setupRelay" placeholder="https://example.trycloudflare.com/join#token=..." value="${escapeHtml(setupDraft.relay_url)}">
               </label>
               <label>
-                Circle code
-                <input id="setupCode" maxlength="20" value="${escapeHtml(setupDraft.circle_code)}">
+                Invite token
+                <input id="setupToken" maxlength="256" value="${escapeHtml(setupDraft.invite_token)}">
               </label>
             </div>
             <button class="primary" type="submit">${hasProfile ? "Continue" : "Enter"}</button>
@@ -215,7 +231,7 @@ function wireSetup() {
     button.addEventListener("click", () => {
       setupDraft.nickname = document.getElementById("setupNickname")?.value || "";
       setupDraft.relay_url = document.getElementById("setupRelay")?.value || setupDraft.relay_url;
-      setupDraft.circle_code = document.getElementById("setupCode")?.value || setupDraft.circle_code;
+      setupDraft.invite_token = document.getElementById("setupToken")?.value || setupDraft.invite_token;
       setupMode = button.dataset.setupMode;
       renderSetup();
     });
@@ -229,20 +245,23 @@ function wireSetup() {
     const file = event.target.files?.[0];
     if (!file) return;
     setupAvatar = await resizeImage(file, 300, 0.82);
-    document.getElementById("setupAvatarPreview").innerHTML = `<span class="avatar-large"><img src="${setupAvatar}" alt=""></span>`;
+    const avatar = safeImageSrc(setupAvatar);
+    if (avatar) document.getElementById("setupAvatarPreview").innerHTML = `<span class="avatar-large"><img src="${escapeHtml(avatar)}" alt=""></span>`;
   });
 
   document.getElementById("setupForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const nickname = (document.getElementById("setupNickname")?.value || bootstrap.settings.nickname || "").trim();
     const avatar = setupAvatar || bootstrap.settings.avatar || "";
-    const relayUrl = document.getElementById("setupRelay")?.value.trim() || "";
-    const circleCode = document.getElementById("setupCode")?.value.trim() || "";
+    const inviteValue = document.getElementById("setupRelay")?.value.trim() || "";
+    const parsedInvite = parseInviteValue(inviteValue);
+    const inviteToken = document.getElementById("setupToken")?.value.trim() || parsedInvite.token;
     try {
       await api("/api/connect", {
         mode: setupMode,
-        relay_url: relayUrl,
-        circle_code: circleCode,
+        invite_url: inviteValue,
+        relay_url: parsedInvite.relayUrl,
+        invite_token: inviteToken,
         share_activity: true,
       });
       const state = await api("/api/profile", { nickname, avatar });
@@ -297,9 +316,9 @@ function renderMain() {
 }
 
 function renderSidebar(settings, me) {
-  const hostUrl = settings.public_url || settings.invite_urls?.[0] || settings.local_url || settings.relay_url;
+  const hostUrl = settings.host_invite_url || "";
   const relayField = settings.is_host ? hostUrl : settings.relay_url;
-  const shownCode = settings.is_host ? settings.host_circle_code : settings.circle_code;
+  const shownToken = settings.is_host ? "" : settings.invite_token;
   const hostActive = settings.connection_mode === "host";
   const tunnel = settings.tunnel || {};
   const tunnelText = settings.public_url
@@ -340,25 +359,21 @@ function renderSidebar(settings, me) {
       ${hostActive ? `
         <div class="connection">
           <label>
-            Relay URL
+            Invite URL
             <input value="${escapeHtml(relayField || "")}" readonly>
           </label>
           <p class="muted small">${escapeHtml(tunnelText)}${tunnel.error ? `: ${escapeHtml(tunnel.error)}` : ""}</p>
-          <label>
-            Circle code
-            <input value="${escapeHtml(shownCode || "")}" readonly>
-          </label>
-          <button type="button" data-copy="${escapeHtml(`${hostUrl} | ${shownCode || ""}`)}">Copy invite</button>
+          <button type="button" data-copy="${escapeHtml(hostUrl)}">Copy invite</button>
         </div>
       ` : `
         <form id="connectionForm" class="connection">
           <label>
-            Relay URL
+            Invite URL
             <input id="relayUrl" value="${escapeHtml(relayField || "")}">
           </label>
           <label>
-            Circle code
-            <input id="circleCode" maxlength="20" value="${escapeHtml(shownCode || "")}">
+            Invite token
+            <input id="inviteToken" maxlength="256" value="${escapeHtml(shownToken || "")}">
           </label>
           <button type="submit">Save join info</button>
         </form>
@@ -369,6 +384,7 @@ function renderSidebar(settings, me) {
 
 function renderFeed() {
   const posts = [...(circle?.posts || [])].reverse();
+  const draftImage = safeImageSrc(postImage);
   return `
     <section class="section">
       <div class="section-head">
@@ -385,11 +401,11 @@ function renderFeed() {
           Picture
           <input id="postImage" type="file" accept="image/*">
         </label>
-        <div id="postImagePreview" class="${postImage ? "" : "hidden"}">
-          ${postImage ? `<img class="post-image" src="${postImage}" alt="">` : ""}
+        <div id="postImagePreview" class="${draftImage ? "" : "hidden"}">
+          ${draftImage ? `<img class="post-image" src="${escapeHtml(draftImage)}" alt="">` : ""}
         </div>
         <div class="form-actions">
-          <button type="button" class="soft ${postImage ? "" : "hidden"}" data-action="clear-post-image">Remove picture</button>
+          <button type="button" class="soft ${draftImage ? "" : "hidden"}" data-action="clear-post-image">Remove picture</button>
           <button class="primary" type="submit">Post</button>
         </div>
       </form>
@@ -408,6 +424,7 @@ function renderPost(post) {
   const kind = post.kind === "plan" ? "To do" : "Done";
   const pillClass = post.kind === "plan" ? "amber" : "green";
   const comments = (circle?.comments || []).filter((comment) => comment.post_id === post.id);
+  const image = safeImageSrc(post.image);
   return `
     <article class="post">
       <div class="post-head">
@@ -421,7 +438,7 @@ function renderPost(post) {
         <span class="pill ${pillClass}">${kind}</span>
       </div>
       ${post.text ? `<p>${escapeHtml(post.text)}</p>` : ""}
-      ${post.image ? `<img class="post-image" src="${post.image}" alt="">` : ""}
+      ${image ? `<img class="post-image" src="${escapeHtml(image)}" alt="">` : ""}
       <div class="comment-list">
         ${comments.length ? comments.map(renderComment).join("") : `<span class="muted small">No comments yet.</span>`}
       </div>
@@ -505,9 +522,9 @@ function renderActivityCard(profile) {
       </div>
       ${body}
       <div class="inline-actions">
-        ${!isSelf && !canSee && !outgoing ? `<button type="button" data-action="request" data-id="${profile.id}">Ask to see</button>` : ""}
-        ${incoming ? `<button type="button" class="primary" data-action="allow" data-id="${profile.id}">Allow request</button>` : ""}
-        ${!isSelf ? `<button type="button" data-action="note-to" data-id="${profile.id}">Send note</button>` : ""}
+        ${!isSelf && !canSee && !outgoing ? `<button type="button" data-action="request" data-id="${escapeHtml(profile.id)}">Ask to see</button>` : ""}
+        ${incoming ? `<button type="button" class="primary" data-action="allow" data-id="${escapeHtml(profile.id)}">Allow request</button>` : ""}
+        ${!isSelf ? `<button type="button" data-action="note-to" data-id="${escapeHtml(profile.id)}">Send note</button>` : ""}
       </div>
     </article>
   `;
@@ -523,13 +540,19 @@ function renderActivitySummary(activity) {
         ${apps.length ? apps.map((item) => `
           <div class="bar-row">
             <span class="bar-label">${escapeHtml(item.name)}</span>
-            <span class="bar-track"><span class="bar-fill" style="width:${Math.max(6, Math.round((item.share || 0) * 100))}%"></span></span>
+            <span class="bar-track"><span class="bar-fill ${barWidthClass(item.share)}"></span></span>
             <span class="muted small">${escapeHtml(item.minutes)}m</span>
           </div>
         `).join("") : `<div class="muted small">No app samples yet.</div>`}
       </div>
     </div>
   `;
+}
+
+function barWidthClass(share) {
+  const value = Number.isFinite(Number(share)) ? Number(share) : 0;
+  const level = Math.max(1, Math.min(20, Math.ceil(value * 20)));
+  return `w-${level}`;
 }
 
 function renderNotes() {
@@ -544,7 +567,7 @@ function renderNotes() {
       </div>
       <form id="noteForm" class="note-form">
         <select id="noteTo" ${brothers.length ? "" : "disabled"}>
-          ${brothers.map((profile) => `<option value="${profile.id}">${escapeHtml(profile.nickname)}</option>`).join("")}
+          ${brothers.map((profile) => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.nickname)}</option>`).join("")}
         </select>
         <textarea id="noteText" maxlength="500" placeholder="Write something you would say if he was about to give up."></textarea>
         <div class="quick-row">
@@ -583,7 +606,7 @@ function renderNote(note) {
         <span class="pill ${unread ? "amber" : "green"}">${unread ? "New" : "No reply needed"}</span>
       </div>
       <p>${escapeHtml(note.text)}</p>
-      ${unread ? `<div class="inline-actions"><button type="button" data-action="read-note" data-id="${note.id}">Mark seen</button></div>` : ""}
+      ${unread ? `<div class="inline-actions"><button type="button" data-action="read-note" data-id="${escapeHtml(note.id)}">Mark seen</button></div>` : ""}
     </article>
   `;
 }
@@ -626,9 +649,9 @@ function renderBrother(profile) {
       </div>
       ${isSelf ? "" : `
         <div class="inline-actions">
-          ${iSeeHis ? `<span class="pill green">Access accepted</span>` : outgoing ? `<span class="pill amber">Request sent</span>` : `<button type="button" data-action="request" data-id="${profile.id}">Ask to see</button>`}
-          ${seesMine ? `<button type="button" class="warn" data-action="revoke" data-id="${profile.id}">Stop sharing mine</button>` : `<button type="button" class="${incoming ? "primary" : ""}" data-action="allow" data-id="${profile.id}">${incoming ? "Allow request" : "Share mine"}</button>`}
-          <button type="button" data-action="note-to" data-id="${profile.id}">Send note</button>
+          ${iSeeHis ? `<span class="pill green">Access accepted</span>` : outgoing ? `<span class="pill amber">Request sent</span>` : `<button type="button" data-action="request" data-id="${escapeHtml(profile.id)}">Ask to see</button>`}
+          ${seesMine ? `<button type="button" class="warn" data-action="revoke" data-id="${escapeHtml(profile.id)}">Stop sharing mine</button>` : `<button type="button" class="${incoming ? "primary" : ""}" data-action="allow" data-id="${escapeHtml(profile.id)}">${incoming ? "Allow request" : "Share mine"}</button>`}
+          <button type="button" data-action="note-to" data-id="${escapeHtml(profile.id)}">Send note</button>
         </div>
       `}
     </article>
@@ -660,11 +683,15 @@ function wireDashboard() {
 
   document.getElementById("connectionForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const inviteValue = document.getElementById("relayUrl").value;
+    const parsedInvite = parseInviteValue(inviteValue);
+    const inviteToken = document.getElementById("inviteToken").value.trim() || parsedInvite.token;
     try {
       await api("/api/connect", {
         mode: "join",
-        relay_url: document.getElementById("relayUrl").value,
-        circle_code: document.getElementById("circleCode").value,
+        invite_url: inviteValue,
+        relay_url: parsedInvite.relayUrl,
+        invite_token: inviteToken,
       });
       circle = await api("/api/profile", {
         nickname: bootstrap.settings.nickname,
@@ -712,9 +739,15 @@ function wireDashboard() {
     const file = event.target.files?.[0];
     if (!file) return;
     postImage = await resizeImage(file, 1100, 0.78);
+    const image = safeImageSrc(postImage);
+    if (!image) {
+      postImage = "";
+      showToast("Image could not be loaded.");
+      return;
+    }
     const preview = document.getElementById("postImagePreview");
     preview.classList.remove("hidden");
-    preview.innerHTML = `<img class="post-image" src="${postImage}" alt="">`;
+    preview.innerHTML = `<img class="post-image" src="${escapeHtml(image)}" alt="">`;
   });
 
   document.getElementById("postForm")?.addEventListener("submit", async (event) => {
