@@ -1,59 +1,97 @@
 # Brotherhood
 
-A private desktop MVP for a small friend circle: post wins or plans, send encouragement notes, and share light activity summaries only with people you allow.
+Brotherhood è un’app Android sperimentale per comunicazioni private, peer-to-peer e basate
+su inviti. Non richiede numero di telefono, e-mail, rubrica, account centrale, dominio,
+VPS o servizio a pagamento.
 
-## Run it
+> **Stato di sicurezza:** alpha di sviluppo, non sottoposta ad audit. La build attuale
+> protegge chiavi e contenuti locali e cifra i pacchetti LAN, ma **non integra ancora Tor**
+> e non offre ancora forward secrecy. Non usarla per situazioni ad alto rischio.
 
-Double-click `Start Brotherhood.bat`.
+## Cosa funziona
 
-The launcher creates a local `.venv` folder on first run and installs pinned requirements from `requirements.txt`, including Pillow for safe image validation. The app opens in your browser as a local desktop app. On first launch, create a profile. Nickname is required; image is optional.
+- identità locale con chiavi separate per cifratura e firma;
+- archivio cifrato tramite AES-GCM e Android Keystore;
+- blocco dell’app con PIN derivato tramite PBKDF2-HMAC-SHA256;
+- contatti tramite invito firmato, testo, link o QR;
+- verifica manuale dell’impronta, nome locale, blocco e rimozione;
+- chat testuale cifrata tra due telefoni sulla stessa rete locale;
+- coda offline, retry esponenziale, deduplicazione e ricevute firmate;
+- piccoli gruppi privati con cifratura separata per ogni destinatario;
+- immagini corrette nell’orientamento, ridimensionate e ricodificate senza EXIF;
+- nessun tracker, analytics, Firebase, Supabase, Twilio o backend Brotherhood.
 
-After that, each launch asks whether you want to `Host circle` or `Join circle`. Your profile stays on the computer, but the connection mode resets when the app closes.
+Il vecchio prototipo Python/Cloudflare resta temporaneamente nella cartella `app/` come
+codice legacy, ma non fa parte dell’APK Android e non rappresenta la nuova architettura.
 
-## Use it with friends
+## Requisiti Android
 
-1. One person chooses `Host circle`.
-2. Wait a few seconds for the public Relay URL to appear. It should usually be an `https://...trycloudflare.com` address.
-3. Each friend runs the same app on their own computer, chooses `Join circle`, and pastes those two values.
-4. For activity sharing, each person must ask and be allowed.
+- `minSdk 28` — Android 9;
+- `targetSdk 35` — Android 15;
+- JDK 17;
+- Android SDK Platform 35 e Build Tools 35.x.
 
-You can switch modes from the Connection panel. Switching from Host to Join stops public relay hosting immediately; the local app stays open so you can enter the circle you want to join.
+Le versioni Android non sono ancora state provate su dispositivi fisici; la build e i test
+JVM vengono verificati nel repository. Consulta [docs/TESTING.md](docs/TESTING.md).
 
-Use `Close app` in the top bar to stop the local server and the app process.
+## Compilazione
 
-Distance hosting uses Cloudflare Quick Tunnel through the bundled `cloudflared.exe`. The public URL is temporary and changes whenever the host restarts the app. If the public URL does not appear, check that the host computer has internet access and that antivirus/firewall did not block `cloudflared.exe`.
-
-## Build `dist`
-
-Run this after pulling updates or changing code:
+Su Windows:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build_dist.ps1
+$env:JAVA_HOME = "C:\percorso\al\jdk-17"
+$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
+.\gradlew.bat clean testDebugUnitTest lintDebug assembleDebug
 ```
 
-The script creates or uses `.venv`, installs `requirements-build.txt`, removes the old generated `dist/`, `build/`, and `Brotherhood.spec`, then creates `dist\Brotherhood\Brotherhood.exe` with Pillow and the latest app files bundled.
+Su Linux/macOS:
 
-## Privacy shape
+```bash
+export JAVA_HOME=/percorso/al/jdk-17
+export ANDROID_HOME="$HOME/Android/Sdk"
+./gradlew clean testDebugUnitTest lintDebug assembleDebug
+```
 
-Brotherhood does not take screenshots, read keystrokes, share full URLs, or share search queries.
+L’APK viene creato in `app/build/outputs/apk/debug/app-debug.apk`. Per installarlo:
 
-It shares only:
+```powershell
+adb install -r .\app\build\outputs\apk\debug\app-debug.apk
+```
 
-- active app names sampled roughly every 10 seconds
-- app time estimates for the last hour
+Istruzioni complete: [docs/BUILD.md](docs/BUILD.md).
 
-It does not share websites or browser history. Chrome is shown only as `Chrome`, Discord as `Discord`, Steam as `Steam`, and Codex as `Codex`.
+## Prova con due telefoni
 
-## Data
+1. Collega entrambi i telefoni alla stessa rete Wi-Fi.
+2. Installa e apri Brotherhood su entrambi.
+3. Crea un’identità e un PIN su ciascun telefono.
+4. Sul primo telefono apri **Contatti → Mostra il mio invito**.
+5. Sul secondo usa **Aggiungi → Scansiona QR**.
+6. Ripeti nell’altra direzione, poi confronta le impronte.
+7. Apri la chat e invia un messaggio.
 
-Local data is stored in `%APPDATA%\BrotherhoodMVP`.
+Se il destinatario è offline o l’app è chiusa, il messaggio resta nella coda cifrata del
+mittente e viene ritentato quando l’app è aperta. In questa alpha il servizio in background
+non è attivo.
 
-The host computer stores the shared circle data. This MVP is for trusted friends, not for public deployment.
+## Cosa non è
 
-## Known MVP limits
+Brotherhood non è un social network: non esistono profili pubblici, ricerca globale,
+follower, suggerimenti di contatti, pubblicità o caricamento della rubrica. Non promette
+anonimato assoluto e non può proteggere da telefono compromesso, destinatario malevolo,
+screenshot o analisi avanzata del traffico.
 
-- No end-to-end encryption yet.
-- Friends need to run the app for their own activity to update.
-- The host must keep Brotherhood open for friends to connect.
-- The public tunnel URL is temporary and should only be shared with trusted friends.
-- This is a prototype, not a hardened security product.
+## Documentazione
+
+- [Decisione architetturale](docs/ARCHITECTURE_DECISION.md)
+- [Architettura](docs/ARCHITECTURE.md)
+- [Threat model](docs/THREAT_MODEL.md)
+- [Limiti reali](docs/LIMITATIONS.md)
+- [Privacy](PRIVACY.md)
+- [Segnalazioni di sicurezza](SECURITY.md)
+
+## Licenza
+
+Codice pubblicato sotto GNU General Public License v3 o successiva. Brotherhood è
+un’implementazione indipendente: non contiene codice copiato da Briar. Vedi
+[NOTICE.md](NOTICE.md) e [LICENSE](LICENSE).

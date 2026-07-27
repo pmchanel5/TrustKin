@@ -1,0 +1,35 @@
+name: Publish tagged test APK
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+      - name: Verify and build
+        run: ./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
+      - name: Label test artifact and checksum
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk brotherhood-${GITHUB_REF_NAME}-DEBUG-UNSIGNED.apk
+          sha256sum brotherhood-${GITHUB_REF_NAME}-DEBUG-UNSIGNED.apk > brotherhood-${GITHUB_REF_NAME}-DEBUG-UNSIGNED.apk.sha256
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            brotherhood-${GITHUB_REF_NAME}-DEBUG-UNSIGNED.apk \
+            brotherhood-${GITHUB_REF_NAME}-DEBUG-UNSIGNED.apk.sha256 \
+            --title "Brotherhood ${GITHUB_REF_NAME} (test build)" \
+            --notes "Build debug sperimentale e non firmata per test. Leggere docs/LIMITATIONS.md."

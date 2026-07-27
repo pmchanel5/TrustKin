@@ -5,3 +5,12 @@ build/
 *.spec
 .venv/
 .vendor/
+.gradle/
+local.properties
+*.jks
+*.keystore
+*.apk
+app/build/
+captures/
+.idea/
+artifacts/
