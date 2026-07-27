@@ -3,9 +3,10 @@ package org.brotherhood.app.storage
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.util.AtomicFile
 import java.io.File
+import java.io.FileOutputStream
 import java.security.KeyStore
-import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -18,16 +19,16 @@ import org.brotherhood.app.model.AppState
 
 class SecureStateStore(context: Context) {
     private val stateFile = File(context.noBackupFilesDir, "brotherhood-state-v1.enc")
+    private val atomicStateFile = AtomicFile(stateFile)
     private val json = Json {
         encodeDefaults = true
         ignoreUnknownKeys = true
         explicitNulls = false
     }
-    private val random = SecureRandom()
 
     suspend fun load(): AppState = withContext(Dispatchers.IO) {
         if (!stateFile.exists()) return@withContext AppState()
-        val bytes = stateFile.readBytes()
+        val bytes = atomicStateFile.openRead().use { it.readBytes() }
         require(bytes.size >= HEADER_BYTES + GCM_TAG_BYTES) { "Archivio locale danneggiato" }
         require(bytes[0] == FORMAT_VERSION) { "Versione archivio non supportata" }
         val iv = bytes.copyOfRange(1, HEADER_BYTES)
@@ -45,29 +46,36 @@ class SecureStateStore(context: Context) {
     suspend fun save(state: AppState) = withContext(Dispatchers.IO) {
         val plaintext = json.encodeToString(state).encodeToByteArray()
         try {
-            val iv = ByteArray(IV_BYTES).also(random::nextBytes)
             val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, iv))
+            // With randomized encryption enabled, Android Keystore must generate the IV.
+            // Supplying an IV from the app causes "Caller-provided IV not permitted".
+            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+            val iv = requireNotNull(cipher.iv) { "Android Keystore non ha generato un IV" }
+            require(iv.size == IV_BYTES) { "Dimensione IV GCM non valida: ${iv.size}" }
             val encrypted = cipher.doFinal(plaintext)
-            val temp = File(stateFile.parentFile, "${stateFile.name}.tmp")
-            temp.outputStream().use { output ->
+
+            var pendingOutput: FileOutputStream? = null
+            try {
+                val output = atomicStateFile.startWrite()
+                pendingOutput = output
                 output.write(byteArrayOf(FORMAT_VERSION))
                 output.write(iv)
                 output.write(encrypted)
                 output.flush()
                 output.fd.sync()
+                atomicStateFile.finishWrite(output)
+                pendingOutput = null
+            } catch (error: Throwable) {
+                pendingOutput?.let(atomicStateFile::failWrite)
+                throw error
             }
-            check(temp.renameTo(stateFile) || run {
-                stateFile.delete()
-                temp.renameTo(stateFile)
-            }) { "Impossibile salvare l'archivio locale" }
         } finally {
             plaintext.fill(0)
         }
     }
 
     suspend fun deleteIdentityAndData() = withContext(Dispatchers.IO) {
-        if (stateFile.exists()) stateFile.delete()
+        atomicStateFile.delete()
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
         if (keyStore.containsAlias(KEY_ALIAS)) keyStore.deleteEntry(KEY_ALIAS)
     }
