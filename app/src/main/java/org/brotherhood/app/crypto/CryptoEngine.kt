@@ -23,6 +23,7 @@ import org.brotherhood.app.model.ContactCard
 import org.brotherhood.app.model.DeliveryReceipt
 import org.brotherhood.app.model.LocalIdentity
 import org.brotherhood.app.model.MessagePayload
+import org.brotherhood.app.model.NetworkFrame
 import org.brotherhood.app.model.SignedInvite
 import org.brotherhood.app.model.WireEnvelope
 
@@ -67,11 +68,19 @@ class CryptoEngine {
         identity: LocalIdentity,
         endpointHost: String,
         endpointPort: Int,
+        torOnion: String = "",
+        torPort: Int = 80,
+        endpointRevision: Int = 1,
         now: Long = System.currentTimeMillis(),
         validityMillis: Long = 24 * 60 * 60 * 1000L,
     ): String {
-        require(endpointHost.length in 3..253) { "Indirizzo locale non disponibile" }
-        require(endpointPort in 1..65535) { "Porta non valida" }
+        val hasLanEndpoint = endpointHost.length in 3..253 && endpointPort in 1..65535
+        val hasTorEndpoint = isValidOnionV3(torOnion)
+        require(hasLanEndpoint || hasTorEndpoint) { "Nessun endpoint disponibile" }
+        require(endpointHost.isBlank() || hasLanEndpoint) { "Endpoint LAN non valido" }
+        require(torOnion.isBlank() || isValidOnionV3(torOnion)) { "Endpoint Tor non valido" }
+        require(torPort in 1..65535) { "Porta Tor non valida" }
+        require(endpointRevision > 0) { "Revisione endpoint non valida" }
         val card = ContactCard(
             id = identity.id,
             displayName = identity.displayName,
@@ -80,6 +89,9 @@ class CryptoEngine {
             signingPublicKeyset = identity.signingPublicKeyset,
             endpointHost = endpointHost,
             endpointPort = endpointPort,
+            torOnion = torOnion,
+            torPort = torPort,
+            endpointRevision = endpointRevision,
             issuedAt = now,
             expiresAt = now + validityMillis,
             nonce = b64(ByteArray(16).also(random::nextBytes)),
@@ -101,8 +113,16 @@ class CryptoEngine {
         require(card.expiresAt >= now) { "Invito scaduto" }
         require(card.issuedAt <= now + 5 * 60 * 1000L) { "Data invito non valida" }
         require(card.displayName.length in 2..40) { "Nome contatto non valido" }
-        require(card.endpointHost.length in 3..253 && card.endpointPort in 1..65535) {
-            "Endpoint non valido"
+        val hasLanEndpoint =
+            card.endpointHost.length in 3..253 && card.endpointPort in 1..65535
+        val hasTorEndpoint = isValidOnionV3(card.torOnion)
+        require(hasLanEndpoint || hasTorEndpoint) { "Nessun endpoint disponibile" }
+        require(card.endpointHost.isBlank() || hasLanEndpoint) { "Endpoint LAN non valido" }
+        require(card.torOnion.isBlank() || isValidOnionV3(card.torOnion)) {
+            "Endpoint Tor non valido"
+        }
+        require(card.torPort in 1..65535 && card.endpointRevision > 0) {
+            "Revisione endpoint non valida"
         }
         require(card.encryptionPublicKeyset.length <= 16_384) { "Chiave troppo grande" }
         require(card.signingPublicKeyset.length <= 16_384) { "Chiave troppo grande" }
@@ -121,6 +141,9 @@ class CryptoEngine {
         signingPublicKeyset = card.signingPublicKeyset,
         endpointHost = card.endpointHost,
         endpointPort = card.endpointPort,
+        torOnion = card.torOnion,
+        torPort = card.torPort,
+        endpointRevision = card.endpointRevision,
         verified = verified,
         addedAt = System.currentTimeMillis(),
     )
@@ -165,6 +188,9 @@ class CryptoEngine {
             "Data messaggio non valida"
         }
         require(envelope.ciphertext.length <= MAX_CIPHERTEXT_BASE64_CHARS) { "Messaggio troppo grande" }
+        require(envelope.signature.length in 32..MAX_SIGNATURE_BASE64_CHARS) {
+            "Firma messaggio non valida"
+        }
         verify(
             contact.signingPublicKeyset,
             decoder.decode(envelope.signature),
@@ -172,9 +198,18 @@ class CryptoEngine {
         )
         val decryptor = deserialize(identity.encryptionPrivateKeyset)
             .getPrimitive(HybridDecrypt::class.java)
-        val plaintext = decryptor.decrypt(decoder.decode(envelope.ciphertext), messageContext(identity.id))
-        require(plaintext.size <= MAX_PLAINTEXT_BYTES) { "Messaggio decifrato troppo grande" }
-        return json.decodeFromString(plaintext.decodeToString())
+        val ciphertext = decoder.decode(envelope.ciphertext)
+        val plaintext = try {
+            decryptor.decrypt(ciphertext, messageContext(identity.id))
+        } finally {
+            ciphertext.fill(0)
+        }
+        return try {
+            require(plaintext.size <= MAX_PLAINTEXT_BYTES) { "Messaggio decifrato troppo grande" }
+            json.decodeFromString(plaintext.decodeToString())
+        } finally {
+            plaintext.fill(0)
+        }
     }
 
     fun createReceipt(
@@ -193,9 +228,65 @@ class CryptoEngine {
         )
     }
 
+    fun createNetworkFrame(
+        identity: LocalIdentity,
+        envelope: WireEnvelope,
+        now: Long = System.currentTimeMillis(),
+    ): NetworkFrame {
+        require(envelope.senderId == identity.id) { "Mittente envelope non valido" }
+        val unsigned = NetworkFrame(
+            senderId = identity.id,
+            recipientId = envelope.recipientId,
+            nonce = b64(ByteArray(24).also(random::nextBytes)),
+            timestamp = now,
+            envelope = envelope,
+            signature = "",
+        )
+        return unsigned.copy(
+            signature = b64(sign(identity.signingPrivateKeyset, canonicalFrame(unsigned))),
+        )
+    }
+
+    fun verifyNetworkFrame(
+        identity: LocalIdentity,
+        contact: Contact,
+        frame: NetworkFrame,
+        now: Long = System.currentTimeMillis(),
+    ) {
+        require(frame.version == 2) { "Versione protocollo non supportata" }
+        require(frame.senderId == contact.id && frame.envelope.senderId == contact.id) {
+            "Mittente frame non valido"
+        }
+        require(frame.recipientId == identity.id && frame.envelope.recipientId == identity.id) {
+            "Destinatario frame non valido"
+        }
+        require(frame.nonce.length in 24..64) { "Nonce non valido" }
+        val decodedNonce = runCatching { decoder.decode(frame.nonce) }
+            .getOrElse { throw IllegalArgumentException("Nonce non valido") }
+        try {
+            require(decodedNonce.size == 24) { "Nonce non valido" }
+        } finally {
+            decodedNonce.fill(0)
+        }
+        require(frame.signature.length in 32..MAX_SIGNATURE_BASE64_CHARS) {
+            "Firma frame non valida"
+        }
+        require(frame.timestamp in (now - FRAME_WINDOW_MS)..(now + MAX_CLOCK_SKEW_MS)) {
+            "Data handshake non valida"
+        }
+        verify(
+            contact.signingPublicKeyset,
+            decoder.decode(frame.signature),
+            canonicalFrame(frame.copy(signature = "")),
+        )
+    }
+
     fun verifyReceipt(contact: Contact, receipt: DeliveryReceipt, messageId: String) {
         require(receipt.version == 1 && receipt.messageId == messageId) { "Ricevuta non valida" }
         require(receipt.recipientId == contact.id) { "Destinatario ricevuta non valido" }
+        require(receipt.signature.length in 32..MAX_SIGNATURE_BASE64_CHARS) {
+            "Firma ricevuta non valida"
+        }
         verify(
             contact.signingPublicKeyset,
             decoder.decode(receipt.signature),
@@ -220,6 +311,15 @@ class CryptoEngine {
         receipt.messageId,
         receipt.recipientId,
         receipt.receivedAt.toString(),
+    ).joinToString("\u001f").encodeToByteArray()
+
+    private fun canonicalFrame(frame: NetworkFrame): ByteArray = listOf(
+        frame.version.toString(),
+        frame.senderId,
+        frame.recipientId,
+        frame.nonce,
+        frame.timestamp.toString(),
+        json.encodeToString(WireEnvelope.serializer(), frame.envelope),
     ).joinToString("\u001f").encodeToByteArray()
 
     private fun messageContext(recipientId: String): ByteArray =
@@ -252,10 +352,16 @@ class CryptoEngine {
             .copyOfRange(0, 12)
             .joinToString(":") { "%02X".format(it) }
 
+    private fun isValidOnionV3(value: String): Boolean =
+        ONION_V3.matches(value.lowercase())
+
     companion object {
-        const val MAX_PLAINTEXT_BYTES = 2_500_000
-        const val MAX_CIPHERTEXT_BASE64_CHARS = 4_000_000
+        const val MAX_PLAINTEXT_BYTES = 3_200_000
+        const val MAX_CIPHERTEXT_BASE64_CHARS = 4_400_000
         const val MAX_MESSAGE_AGE_MS = 30L * 24 * 60 * 60 * 1000
         const val MAX_CLOCK_SKEW_MS = 10L * 60 * 1000
+        const val FRAME_WINDOW_MS = 10L * 60 * 1000
+        private const val MAX_SIGNATURE_BASE64_CHARS = 512
+        private val ONION_V3 = Regex("^[a-z2-7]{56}\\.onion$")
     }
 }

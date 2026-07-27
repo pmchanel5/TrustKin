@@ -5,20 +5,31 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.Base64
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.brotherhood.app.media.ImageSanitizer
+import org.brotherhood.app.media.VoiceMessageRecorder
+import org.brotherhood.app.media.VoicePlaybackController
+import org.brotherhood.app.model.ChatMessage
 import org.brotherhood.app.model.ImportInviteResult
 import org.brotherhood.app.model.MessageKind
 import org.brotherhood.app.model.MessagePayload
+import org.brotherhood.app.model.AvailabilityMode
+import org.brotherhood.app.transport.TransportResult
+import org.brotherhood.app.background.BackgroundModeManager
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as BrotherhoodApplication
     val state = app.repository.state
-    val lanStatus = app.lanTransport.status
+    val lanStatus = app.lanTransport.state
+    val torStatus = app.torTransport.state
+    val routerDiagnostics = app.transportRouter.diagnostics
 
     private val mutableInitialized = MutableStateFlow(false)
     val initialized: StateFlow<Boolean> = mutableInitialized.asStateFlow()
@@ -31,16 +42,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val mutablePendingInvite = MutableStateFlow<String?>(null)
     val pendingInvite: StateFlow<String?> = mutablePendingInvite.asStateFlow()
     private val retryRunning = AtomicBoolean(false)
+    private val voiceFinalizing = AtomicBoolean(false)
+    private val voiceRecorder = VoiceMessageRecorder(application)
+    private val voicePlayback = VoicePlaybackController(application)
+    val voiceRecording = voiceRecorder.state
+    val voicePlaybackState = voicePlayback.state
+    private var voiceTarget: VoiceTarget? = null
+    private var voiceStartJob: Job? = null
 
     init {
         viewModelScope.launch {
-            runCatching { app.repository.initialize() }
+            runCatching { app.ensureInitialized() }
                 .onFailure { mutableNotice.value = "Archivio locale non leggibile" }
             mutableInitialized.value = true
-            app.lanTransport.start()
+            if (app.repository.state.value.identity != null) {
+                app.runtimeController.acquire(UI_OWNER)
+                BackgroundModeManager.configure(
+                    app,
+                    app.repository.state.value.preferences.availabilityMode,
+                )
+            }
             while (true) {
                 retryQueue()
                 delay(15_000)
+            }
+        }
+        viewModelScope.launch {
+            voiceRecording.collect { recording ->
+                if (recording.limitReached && voiceTarget != null) finishVoiceRecording(cancel = false)
+                else if (recording.interrupted && voiceTarget != null) {
+                    mutableNotice.value = "Registrazione interrotta"
+                    finishVoiceRecording(cancel = true)
+                }
             }
         }
     }
@@ -55,6 +88,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val chars = pin.toCharArray()
                 try {
                     app.repository.createIdentity(name, chars)
+                    app.runtimeController.acquire(UI_OWNER)
+                    BackgroundModeManager.configure(
+                        app,
+                        app.repository.state.value.preferences.availabilityMode,
+                    )
                     mutableUnlocked.value = true
                 } finally {
                     chars.fill('\u0000')
@@ -79,8 +117,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun createInvite(): String = runCatching {
         val status = lanStatus.value
-        val host = status.address.ifBlank { app.lanTransport.currentIpv4Address() }
-        app.repository.createInvite(host, status.port)
+        val host = status.listeningAddress.ifBlank { app.lanTransport.currentIpv4Address() }
+        app.repository.createInvite(host, status.listeningPort.takeIf { it > 0 } ?: 42337)
     }.getOrElse {
         mutableNotice.value = it.message ?: "Invito non disponibile"
         ""
@@ -174,6 +212,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun startVoiceRecording(targetId: String, group: Boolean) {
+        if (voiceTarget != null) return
+        val target = VoiceTarget(targetId, group)
+        voiceTarget = target
+        voiceStartJob = viewModelScope.launch {
+            try {
+                voiceRecorder.start()
+                if (voiceTarget != target) voiceRecorder.cancel()
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                if (voiceTarget == target) voiceTarget = null
+                mutableNotice.value = t.message ?: "Registrazione non disponibile"
+            }
+        }
+    }
+
+    fun finishVoiceRecording(cancel: Boolean) {
+        val target = voiceTarget ?: return
+        if (!voiceFinalizing.compareAndSet(false, true)) return
+        voiceTarget = null
+        viewModelScope.launch {
+            try {
+                voiceStartJob?.join()
+                val voice = voiceRecorder.finish(cancel) ?: return@launch
+                val encoded = Base64.getEncoder().encodeToString(voice.bytes)
+                voice.bytes.fill(0)
+                val payload = MessagePayload(
+                    body = "Messaggio vocale",
+                    kind = MessageKind.VOICE,
+                    attachmentBase64 = encoded,
+                    attachmentMime = voice.mimeType,
+                    attachmentName = voice.fileName,
+                    attachmentSha256 = voice.sha256,
+                    durationMillis = voice.durationMillis,
+                    groupId = if (target.group) target.id else "",
+                )
+                if (target.group) app.repository.enqueueGroupMessage(target.id, payload)
+                else app.repository.enqueueMessage(target.id, payload)
+                retryQueue()
+            } catch (t: Throwable) {
+                mutableNotice.value = t.message ?: "Vocale non salvato"
+            } finally {
+                voiceFinalizing.set(false)
+            }
+        }
+    }
+
+    fun playOrPauseVoice(message: ChatMessage) {
+        runCatching { voicePlayback.playOrPause(message) }
+            .onFailure { mutableNotice.value = it.message ?: "Vocale non riproducibile" }
+    }
+
     fun createGroup(name: String, members: List<String>, onCreated: (String) -> Unit) {
         viewModelScope.launch {
             runCatching { app.repository.createGroup(name, members) }
@@ -188,6 +278,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun blockContact(id: String, blocked: Boolean) {
         viewModelScope.launch { app.repository.setContactBlocked(id, blocked) }
+    }
+
+    fun setContactTorRevoked(id: String, revoked: Boolean) {
+        viewModelScope.launch { app.repository.setContactTorRevoked(id, revoked) }
     }
 
     fun renameContact(id: String, alias: String) {
@@ -205,12 +299,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setAvailabilityMode(mode: AvailabilityMode) {
+        viewModelScope.launch {
+            app.repository.setAvailabilityMode(mode)
+            BackgroundModeManager.configure(app, mode)
+        }
+    }
+
+    fun rotateTorIdentity() {
+        viewModelScope.launch {
+            runBusy {
+                app.torTransport.rotateIdentity()
+                mutableNotice.value =
+                    "Nuovo endpoint Tor creato. Condividi un nuovo invito con i contatti."
+            }
+        }
+    }
+
+    fun onAppForeground() {
+        viewModelScope.launch {
+            app.ensureInitialized()
+            if (app.repository.state.value.identity != null) {
+                app.runtimeController.acquire(UI_OWNER)
+            }
+        }
+    }
+
+    fun onAppBackground() {
+        viewModelScope.launch { app.runtimeController.release(UI_OWNER) }
+    }
+
     fun clearNotice() {
         mutableNotice.value = null
     }
 
     fun deleteIdentity() {
         viewModelScope.launch {
+            voiceTarget = null
+            voiceStartJob?.join()
+            voiceRecorder.cancel()
+            voicePlayback.stop()
+            BackgroundModeManager.configure(app, AvailabilityMode.WHEN_OPEN)
+            app.runtimeController.shutdownAll()
+            app.torTransport.deleteRuntimeData()
             app.repository.deleteAll()
             mutableUnlocked.value = false
             mutableNotice.value = "Identità e dati locali eliminati"
@@ -220,16 +351,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun retryQueue() {
         if (!retryRunning.compareAndSet(false, true)) return
         try {
-            app.repository.dueOutbound().forEach { item ->
-                runCatching {
-                    app.repository.markSending(item.id)
-                    app.lanTransport.send(item)
-                }.onSuccess { receipt ->
-                    app.repository.markDelivered(item.id, receipt)
-                }.onFailure {
-                    app.repository.markTemporaryFailure(item.id, it.javaClass.simpleName)
-                }
-            }
+            app.deliveryEngine.drainDueQueue()
         } finally {
             retryRunning.set(false)
         }
@@ -240,5 +362,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         runCatching { block() }
             .onFailure { mutableNotice.value = it.message ?: "Operazione non riuscita" }
         mutableBusy.value = false
+    }
+
+    override fun onCleared() {
+        voiceStartJob?.cancel()
+        voiceRecorder.close()
+        voicePlayback.close()
+        kotlinx.coroutines.runBlocking { app.runtimeController.release(UI_OWNER) }
+        super.onCleared()
+    }
+
+    private data class VoiceTarget(val id: String, val group: Boolean)
+
+    companion object {
+        private const val UI_OWNER = "ui"
     }
 }

@@ -1,66 +1,100 @@
 # Architettura
 
-## Forma attuale
-
-Per ottenere rapidamente una build verificabile il progetto usa un singolo modulo Gradle
-Android, mantenendo separazioni di package che potranno diventare moduli senza cambiare le
-responsabilità:
+Brotherhood usa un singolo modulo Android, separato per responsabilità:
 
 ```text
 app/
-  ui/          Jetpack Compose, navigazione e stato schermate
-  model/       modelli serializzabili e stati di consegna
-  crypto/      identità, inviti, cifratura, firma e ricevute
-  storage/     archivio cifrato, Android Keystore e PIN
-  data/        repository, code, contatti, gruppi e deduplicazione
-  transport/   trasporto LAN diretto
-  media/       normalizzazione e pulizia immagini
-  core/        retry, replay e frammentazione file
+  ui/          Compose, navigazione, permessi e diagnostica
+  model/       stato serializzabile, code, endpoint e trasferimenti
+  crypto/      identità, inviti, envelope, frame e ricevute
+  storage/     archivio cifrato, Keystore, PIN e migrazioni
+  data/        repository, contatti, gruppi, deduplicazione
+  transport/   interfaccia comune, LAN, Tor, router e delivery engine
+  media/       immagini, registrazione e riproduzione vocale
+  background/  foreground service, WorkManager e boot receiver
+  core/        retry, replay, limiti, blocchi e ricostruzione
 ```
 
-Il vecchio `app/brotherhood.py` non viene incluso dal modulo Android.
+Il prototipo `app/brotherhood.py` non entra nell’APK.
 
-## Flusso identità
+## Identità e archivio
 
-1. Tink genera una chiave privata ECIES P-256 e una ECDSA P-256.
-2. L’identificativo e l’impronta derivano dalle due chiavi pubbliche.
-3. Le chiavi private vengono serializzate solo dentro lo stato cifrato.
-4. Lo stato è cifrato AES-256-GCM con chiave non esportabile di Android Keystore.
-5. Il PIN è conservato come PBKDF2-HMAC-SHA256 con sale casuale e blocca la UI.
+1. Tink genera ECIES P-256 per cifratura e ECDSA P-256 per firma.
+2. ID e impronta derivano dalle chiavi pubbliche.
+3. Chiavi private, onion key, contatti, messaggi e code sono serializzati nello stato.
+4. Lo stato viene cifrato AES-256-GCM con chiave non esportabile Android Keystore.
+5. Il PIN è PBKDF2-HMAC-SHA256 con sale casuale e protegge l’accesso alla UI.
 
-Il PIN non è ancora un secondo fattore crittografico per la chiave di archivio: un processo
-che compromette l’app sul telefono sbloccato può chiedere al Keystore di decifrare.
+Il PIN non deriva la chiave Keystore: non è un secondo fattore crittografico contro un
+processo compromesso sul telefono sbloccato.
 
-## Flusso messaggio LAN
+## Trasporti
 
-1. Il repository salva messaggio e elemento di coda nell’archivio cifrato.
-2. Il mittente cifra un payload con la chiave pubblica ECIES del destinatario.
-3. Firma intestazione e ciphertext con ECDSA.
-4. Il trasporto apre un socket TCP diretto all’endpoint contenuto nell’invito.
-5. Il destinatario accetta solo identità già presenti tra i contatti.
-6. Verifica firma, destinatario, limiti, data e ID anti-replay; poi decifra.
-7. Salva il messaggio prima di restituire una ricevuta firmata.
-8. Il mittente verifica la ricevuta e rimuove l’elemento dalla coda tecnica.
+`MessageTransport` espone tipo, stato osservabile, `start`, `stop` e `send`. LAN e Tor
+ricevono la stessa `NetworkFrame` firmata e restituiscono la stessa ricevuta.
 
-Il destinatario deve essere raggiungibile sulla stessa LAN e avere l’app aperta. Non c’è
-fallback via Internet in questa build.
+```mermaid
+flowchart LR
+    Q["Coda cifrata"] --> R["TransportRouter"]
+    R -->|"1. endpoint LAN"| L["LanTransport"]
+    L -->|"errore temporaneo"| T["TorTransport / SOCKS"]
+    L -->|"ricevuta firmata"| D["Rimuovi blocco dalla coda"]
+    T -->|"ricevuta firmata"| D
+    T -->|"non raggiungibile"| B["Backoff e nuovo tentativo"]
+```
+
+LAN ascolta su TCP 42337 e non esegue discovery pubblico: l’host arriva dall’invito
+firmato. Tor avvia `libtor.so`, un SOCKS locale e un onion service v3 che inoltra la porta
+remota 80 alla stessa porta applicativa locale. Il socket applicativo non viene esposto
+tramite port forwarding Internet.
+
+## Protocollo applicativo
+
+1. Il repository persiste messaggio e elementi di coda.
+2. Il payload viene cifrato ECIES per la chiave pubblica del destinatario.
+3. Il `WireEnvelope` è firmato ECDSA.
+4. La `NetworkFrame` versione 2 lega mittente, destinatario, nonce, timestamp ed envelope
+   con una seconda firma.
+5. Il server applica limite 5 MB, timeout, massimo otto connessioni, rate limit e framing
+   a lunghezza.
+6. Prima di decifrare accetta solo un mittente presente e non bloccato.
+7. Verifica firma frame, finestra temporale, firma envelope, destinatario e limiti payload.
+8. Persiste messaggio o blocco prima di creare una ricevuta firmata.
+9. Il mittente elimina dalla coda soltanto l’elemento confermato.
+
+La stessa frame viene riusata nel fallback LAN→Tor. Se la ricevuta LAN è valida, Tor non
+viene chiamato. Se una ricevuta si perde, l’ID dell’elemento permette al destinatario di
+restituirla senza mostrare una seconda copia.
+
+## Endpoint Tor
+
+Onion e revisione sono dentro la carta contatto firmata. Gli aggiornamenti con revisione
+inferiore vengono rifiutati; cambiare onion alla stessa revisione viene rifiutato. La UI
+può disabilitare localmente l’endpoint di un contatto. La rotazione dell’identità Tor
+incrementa la revisione, crea una nuova onion key e richiede di condividere un nuovo invito.
+
+## Vocali e ripresa
+
+Il registratore scrive un file temporaneo privato, usa Opus/OGG su API 29+ o AAC/MP4 su
+API 28, impone 60 secondi e 1,5 MB, calcola SHA-256 e cancella il file. Il repository divide
+il dato in blocchi da 64 KiB; ogni destinatario di un gruppo riceve elementi di coda
+separati per blocco.
+
+Il destinatario salva i blocchi incompleti nell’archivio cifrato. Sono accettati in ordine
+arbitrario, con metadati coerenti; al completamento vengono ricostruiti, verificati rispetto
+a dimensione e SHA-256, trasformati in un unico messaggio e rimossi dallo stato parziale.
+I trasferimenti parziali scadono dopo sette giorni.
+
+## Background
+
+`TransportRuntimeController` usa proprietari logici (`ui`, worker, servizio) per evitare
+start/stop concorrenti. La modalità foreground mantiene un proprietario finché la notifica
+è attiva; WorkManager lo acquisisce solo durante l’esecuzione; Solo quando aperta usa il
+proprietario UI. Dettagli in [BACKGROUND_BEHAVIOR.md](BACKGROUND_BEHAVIOR.md).
 
 ## Gruppi
 
-Il gruppo contiene massimo 20 ID. Ogni messaggio viene cifrato e inviato separatamente a ogni
-membro. Nome, lista membri e revisione viaggiano dentro il payload cifrato. Dopo la rimozione,
-la revisione aumenta e il membro rimosso non è più destinatario. Non esiste cancellazione
-retroattiva e non viene implementato MLS/Sender Keys in questa fase.
-
-## Immagini
-
-L’immagine viene letta in memoria, orientata in base all’EXIF, ridimensionata, ricodificata
-JPEG e quindi cifrata. La ricodifica rimuove EXIF e GPS. Non viene scritto un file temporaneo
-in chiaro.
-
-## Evoluzione modulare
-
-Quando il trasporto Tor viene scelto, i package diventeranno almeno:
-`core-identity`, `core-crypto`, `core-database`, `core-messaging`, `transport-tor`,
-`transport-local`, `feature-contacts`, `feature-chat`, `feature-groups` e
-`feature-settings`.
+Massimo 20 identità. Ogni messaggio e blocco è cifrato separatamente per ogni membro.
+Nome, membri e revisione viaggiano nel payload cifrato. Soltanto il proprietario può
+aggiornare una composizione già nota; un membro rimosso non riceve le consegne successive.
+Non sono implementati MLS o Sender Keys.

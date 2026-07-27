@@ -2,11 +2,18 @@
 
 Copyright © 2026 Brotherhood contributors.
 
-Brotherhood è distribuito sotto GNU General Public License v3 o successiva.
+Brotherhood è distribuita sotto GNU General Public License v3 o successiva.
 
-Il progetto Briar è stato studiato come riferimento architetturale. Brotherhood non è un
-fork, non contiene codice Briar, non è affiliato al Briar Project e non usa marchi o loghi
-Briar. La valutazione è documentata in `docs/ARCHITECTURE_DECISION.md`.
+Il codice applicativo Brotherhood è un’implementazione indipendente e non è un fork di
+Briar. La versione alpha02 dipende tuttavia da:
 
-Le librerie di terze parti mantengono le rispettive licenze; vedere
-`docs/DEPENDENCIES.md` e i metadati Maven inclusi nella build.
+- **Onion Wrapper** `org.briarproject:onionwrapper-android:0.1.6`, pubblicato dal Briar
+  Project sotto GPLv3;
+- **Do not kill me library** `org.briarproject:dont-kill-me-lib:0.2.7`, dipendenza
+  transitiva pubblicata dal Briar Project sotto GPLv3;
+- **tor-android** `org.briarproject:tor-android:0.4.9.11`, binari Android del Tor Project
+  con metadati Maven BSD-3-Clause.
+
+Brotherhood non è affiliata al Briar Project o al Tor Project e non usa i loro marchi o
+loghi. Tutte le librerie mantengono copyright e licenze originali. Versioni, motivazioni e
+fonti sono elencate in [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md).

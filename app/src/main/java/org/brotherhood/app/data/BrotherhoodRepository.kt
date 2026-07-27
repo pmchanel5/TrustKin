@@ -9,6 +9,9 @@ import kotlinx.coroutines.sync.withLock
 import org.brotherhood.app.core.ReplayProtector
 import org.brotherhood.app.core.RetryPolicy
 import org.brotherhood.app.core.GroupPolicy
+import org.brotherhood.app.core.PayloadValidator
+import org.brotherhood.app.core.AttachmentChunks
+import org.brotherhood.app.core.VoiceTransferAssembler
 import org.brotherhood.app.crypto.CryptoEngine
 import org.brotherhood.app.model.AppState
 import org.brotherhood.app.model.ChatMessage
@@ -17,11 +20,17 @@ import org.brotherhood.app.model.DeliveryReceipt
 import org.brotherhood.app.model.DeliveryStatus
 import org.brotherhood.app.model.ImportInviteResult
 import org.brotherhood.app.model.MessagePayload
+import org.brotherhood.app.model.MessageKind
+import org.brotherhood.app.model.NetworkFrame
 import org.brotherhood.app.model.OutboundItem
 import org.brotherhood.app.model.PrivateGroup
+import org.brotherhood.app.model.AvailabilityMode
+import org.brotherhood.app.model.TorIdentity
 import org.brotherhood.app.model.WireEnvelope
 import org.brotherhood.app.storage.PinHasher
 import org.brotherhood.app.storage.SecureStateStore
+import org.brotherhood.app.storage.StateMigrations
+import org.brotherhood.app.transport.RecipientEndpoint
 
 class BrotherhoodRepository(
     private val store: SecureStateStore,
@@ -34,8 +43,10 @@ class BrotherhoodRepository(
 
     suspend fun initialize() = mutex.withLock {
         val loaded = store.load()
-        mutableState.value = loaded
-        replay = ReplayProtector(loaded.receivedMessageIds)
+        val migrated = StateMigrations.migrate(loaded)
+        mutableState.value = migrated
+        replay = ReplayProtector(migrated.receivedMessageIds)
+        if (migrated != loaded) store.save(migrated)
     }
 
     suspend fun createIdentity(displayName: String, pin: CharArray) = mutex.withLock {
@@ -57,8 +68,17 @@ class BrotherhoodRepository(
     }
 
     fun createInvite(host: String, port: Int): String {
-        val identity = requireNotNull(mutableState.value.identity) { "Identità non disponibile" }
-        return crypto.createInvite(identity, host, port)
+        val snapshot = mutableState.value
+        val identity = requireNotNull(snapshot.identity) { "Identità non disponibile" }
+        val tor = snapshot.torIdentity
+        return crypto.createInvite(
+            identity = identity,
+            endpointHost = host,
+            endpointPort = port,
+            torOnion = tor?.onionAddress.orEmpty(),
+            torPort = 80,
+            endpointRevision = tor?.revision ?: 1,
+        )
     }
 
     suspend fun importInvite(raw: String): ImportInviteResult = mutex.withLock {
@@ -68,11 +88,25 @@ class BrotherhoodRepository(
             require(card.id != identity.id) { "Non puoi aggiungere la tua identità" }
             val incoming = crypto.contactFrom(card)
             val existing = mutableState.value.contacts.firstOrNull { it.id == incoming.id }
+            if (existing != null) {
+                require(incoming.endpointRevision >= existing.endpointRevision) {
+                    "Aggiornamento endpoint obsoleto"
+                }
+                if (incoming.endpointRevision == existing.endpointRevision) {
+                    require(
+                        incoming.torOnion == existing.torOnion &&
+                            incoming.torPort == existing.torPort,
+                    ) { "Endpoint Tor modificato senza nuova revisione" }
+                }
+            }
             val contact = if (existing == null) incoming else incoming.copy(
                 localAlias = existing.localAlias,
                 blocked = existing.blocked,
                 verified = existing.verified,
                 addedAt = existing.addedAt,
+                torEndpointRevoked =
+                    existing.torEndpointRevoked &&
+                        incoming.endpointRevision <= existing.endpointRevision,
             )
             val contacts = mutableState.value.contacts.filterNot { it.id == contact.id } + contact
             update(mutableState.value.copy(contacts = contacts.sortedBy { it.effectiveName.lowercase() }))
@@ -96,6 +130,14 @@ class BrotherhoodRepository(
         copy(contacts = contacts.map { if (it.id == contactId) it.copy(blocked = blocked) else it })
     }
 
+    suspend fun setContactTorRevoked(contactId: String, revoked: Boolean) = mutate {
+        copy(
+            contacts = contacts.map {
+                if (it.id == contactId) it.copy(torEndpointRevoked = revoked) else it
+            },
+        )
+    }
+
     suspend fun removeContact(contactId: String) = mutate {
         copy(
             contacts = contacts.filterNot { it.id == contactId },
@@ -109,31 +151,40 @@ class BrotherhoodRepository(
         val contact = state.contacts.firstOrNull { it.id == contactId }
             ?: throw IllegalArgumentException("Contatto non trovato")
         require(!contact.blocked) { "Il contatto è bloccato" }
-        require(state.outbound.size < MAX_QUEUE) { "Coda di invio piena" }
         val now = System.currentTimeMillis()
         val messageId = UUID.randomUUID().toString()
+        val chunkCount = voiceChunkCount(payload)
+        require(state.outbound.size + chunkCount <= MAX_QUEUE) { "Coda di invio piena" }
+        val validatedPayload = preparePayloadForValidation(payload, messageId)
+        PayloadValidator.validate(validatedPayload)
         val message = ChatMessage(
             id = messageId,
             conversationId = payload.groupId.ifBlank { contactId },
             senderId = identity.id,
             recipientId = contactId,
-            body = payload.body,
-            kind = payload.kind,
-            attachmentBase64 = payload.attachmentBase64,
-            attachmentMime = payload.attachmentMime,
-            attachmentName = payload.attachmentName,
+            body = validatedPayload.body,
+            kind = validatedPayload.kind,
+            attachmentBase64 = validatedPayload.attachmentBase64,
+            attachmentMime = validatedPayload.attachmentMime,
+            attachmentName = validatedPayload.attachmentName,
+            attachmentSha256 = validatedPayload.attachmentSha256,
+            durationMillis = validatedPayload.durationMillis,
             sentAt = now,
             status = DeliveryStatus.QUEUED,
-            replyTo = payload.replyTo,
-            groupId = payload.groupId,
+            replyTo = validatedPayload.replyTo,
+            groupId = validatedPayload.groupId,
         )
-        val outbound = OutboundItem(
-            id = UUID.randomUUID().toString(),
-            messageId = messageId,
-            contactId = contactId,
-            createdAt = now,
-            expiresAt = now + MESSAGE_TTL_MS,
-        )
+        val outbound = (0 until chunkCount).map { chunkIndex ->
+            OutboundItem(
+                id = UUID.randomUUID().toString(),
+                messageId = messageId,
+                contactId = contactId,
+                chunkIndex = chunkIndex,
+                chunkCount = chunkCount,
+                createdAt = now,
+                expiresAt = now + MESSAGE_TTL_MS,
+            )
+        }
         update(
             state.copy(
                 messages = (state.messages + message).takeLast(MAX_MESSAGES),
@@ -152,32 +203,46 @@ class BrotherhoodRepository(
             .filter { it != identity.id }
             .mapNotNull { id -> state.contacts.firstOrNull { it.id == id && !it.blocked } }
         require(recipients.isNotEmpty()) { "Il gruppo non ha membri raggiungibili" }
-        require(state.outbound.size + recipients.size <= MAX_QUEUE) { "Coda di invio piena" }
         val now = System.currentTimeMillis()
         val messageId = UUID.randomUUID().toString()
+        val chunkCount = voiceChunkCount(payload)
+        require(state.outbound.size + recipients.size * chunkCount <= MAX_QUEUE) {
+            "Coda di invio piena"
+        }
+        val validatedPayload = preparePayloadForValidation(
+            payload.copy(groupId = groupId),
+            messageId,
+        )
+        PayloadValidator.validate(validatedPayload)
         val message = ChatMessage(
             id = messageId,
             conversationId = group.id,
             senderId = identity.id,
             recipientId = "",
-            body = payload.body,
-            kind = payload.kind,
-            attachmentBase64 = payload.attachmentBase64,
-            attachmentMime = payload.attachmentMime,
-            attachmentName = payload.attachmentName,
+            body = validatedPayload.body,
+            kind = validatedPayload.kind,
+            attachmentBase64 = validatedPayload.attachmentBase64,
+            attachmentMime = validatedPayload.attachmentMime,
+            attachmentName = validatedPayload.attachmentName,
+            attachmentSha256 = validatedPayload.attachmentSha256,
+            durationMillis = validatedPayload.durationMillis,
             sentAt = now,
             status = DeliveryStatus.QUEUED,
-            replyTo = payload.replyTo,
+            replyTo = validatedPayload.replyTo,
             groupId = group.id,
         )
-        val items = recipients.map { contact ->
-            OutboundItem(
-                id = UUID.randomUUID().toString(),
-                messageId = messageId,
-                contactId = contact.id,
-                createdAt = now,
-                expiresAt = now + MESSAGE_TTL_MS,
-            )
+        val items = recipients.flatMap { contact ->
+            (0 until chunkCount).map { chunkIndex ->
+                OutboundItem(
+                    id = UUID.randomUUID().toString(),
+                    messageId = messageId,
+                    contactId = contact.id,
+                    chunkIndex = chunkIndex,
+                    chunkCount = chunkCount,
+                    createdAt = now,
+                    expiresAt = now + MESSAGE_TTL_MS,
+                )
+            }
         }
         update(
             state.copy(
@@ -195,12 +260,26 @@ class BrotherhoodRepository(
         val message = state.messages.first { it.id == item.messageId }
         val group = message.groupId.takeIf(String::isNotBlank)
             ?.let { id -> state.groups.firstOrNull { it.id == id } }
+        val attachment = if (message.kind == MessageKind.VOICE) {
+            AttachmentChunks.chunk(message.attachmentBase64, item.chunkIndex)
+        } else {
+            message.attachmentBase64 to
+                message.attachmentBase64.takeIf(String::isNotBlank)
+                    ?.let(AttachmentChunks::totalBytes)
+                    .orZero()
+        }
         val payload = MessagePayload(
             body = message.body,
             kind = message.kind,
-            attachmentBase64 = message.attachmentBase64,
+            attachmentBase64 = attachment.first,
             attachmentMime = message.attachmentMime,
             attachmentName = message.attachmentName,
+            attachmentSha256 = message.attachmentSha256,
+            durationMillis = message.durationMillis,
+            logicalMessageId = message.id,
+            attachmentChunkIndex = item.chunkIndex,
+            attachmentChunkCount = item.chunkCount,
+            attachmentTotalBytes = attachment.second,
             replyTo = message.replyTo,
             groupId = message.groupId,
             groupName = group?.name.orEmpty(),
@@ -216,6 +295,33 @@ class BrotherhoodRepository(
         )
     }
 
+    fun frameFor(item: OutboundItem): NetworkFrame {
+        val identity = requireNotNull(mutableState.value.identity)
+        return crypto.createNetworkFrame(identity, envelopeFor(item))
+    }
+
+    fun endpointFor(item: OutboundItem): RecipientEndpoint {
+        val contact = mutableState.value.contacts.first { it.id == item.contactId }
+        return RecipientEndpoint(
+            contactId = contact.id,
+            lanHost = contact.endpointHost,
+            lanPort = contact.endpointPort,
+            torOnion = contact.torOnion,
+            torPort = contact.torPort,
+            torRevoked = contact.torEndpointRevoked,
+        )
+    }
+
+    suspend fun receiveFrame(frame: NetworkFrame): DeliveryReceipt {
+        val snapshot = mutableState.value
+        val identity = requireNotNull(snapshot.identity)
+        val contact = snapshot.contacts.firstOrNull { it.id == frame.senderId }
+            ?: throw SecurityException("Mittente non autorizzato")
+        require(!contact.blocked) { "Mittente bloccato" }
+        crypto.verifyNetworkFrame(identity, contact, frame)
+        return receiveEnvelope(frame.envelope)
+    }
+
     suspend fun receiveEnvelope(envelope: WireEnvelope): DeliveryReceipt = mutex.withLock {
         val state = mutableState.value
         val identity = requireNotNull(state.identity)
@@ -225,8 +331,34 @@ class BrotherhoodRepository(
         if (envelope.messageId in state.receivedMessageIds) {
             return@withLock crypto.createReceipt(identity, envelope.messageId)
         }
-        val payload = crypto.verifyAndDecrypt(identity, contact, envelope)
-        require(replay.accept(envelope.messageId)) { "Messaggio duplicato" }
+        var payload = crypto.verifyAndDecrypt(identity, contact, envelope)
+        PayloadValidator.validate(payload)
+        val now = System.currentTimeMillis()
+        var incomingTransfers = state.incomingVoiceTransfers
+            .filter { now - it.updatedAt <= MESSAGE_TTL_MS }
+        if (payload.kind == MessageKind.VOICE && payload.attachmentChunkCount > 1) {
+            val existing = incomingTransfers.firstOrNull {
+                it.senderId == contact.id && it.logicalMessageId == payload.logicalMessageId
+            }
+            require(existing != null || incomingTransfers.size < MAX_INCOMING_TRANSFERS) {
+                "Troppi trasferimenti in corso"
+            }
+            val progress = VoiceTransferAssembler.accept(existing, contact.id, payload, now)
+            incomingTransfers = incomingTransfers.filterNot {
+                it.senderId == contact.id && it.logicalMessageId == payload.logicalMessageId
+            } + listOfNotNull(progress.transfer)
+            if (progress.completedPayload == null) {
+                require(replay.accept(envelope.messageId)) { "Messaggio duplicato" }
+                update(
+                    state.copy(
+                        receivedMessageIds = replay.snapshot(),
+                        incomingVoiceTransfers = incomingTransfers,
+                    ),
+                )
+                return@withLock crypto.createReceipt(identity, envelope.messageId)
+            }
+            payload = progress.completedPayload
+        }
         var groups = state.groups
         if (payload.groupId.isNotBlank()) {
             val existing = groups.firstOrNull { it.id == payload.groupId }
@@ -249,8 +381,20 @@ class BrotherhoodRepository(
                 groups = groups.filterNot { it.id == receivedGroup.id } + receivedGroup
             }
         }
+        require(replay.accept(envelope.messageId)) { "Messaggio duplicato" }
+        val logicalMessageId = payload.logicalMessageId.ifBlank { envelope.messageId }
+        if (state.messages.any { it.id == logicalMessageId && it.senderId == contact.id }) {
+            update(
+                state.copy(
+                    receivedMessageIds = replay.snapshot(),
+                    incomingVoiceTransfers = incomingTransfers,
+                    groups = groups,
+                ),
+            )
+            return@withLock crypto.createReceipt(identity, envelope.messageId)
+        }
         val message = ChatMessage(
-            id = envelope.messageId,
+            id = logicalMessageId,
             conversationId = payload.groupId.ifBlank { contact.id },
             senderId = contact.id,
             recipientId = identity.id,
@@ -259,6 +403,8 @@ class BrotherhoodRepository(
             attachmentBase64 = payload.attachmentBase64,
             attachmentMime = payload.attachmentMime,
             attachmentName = payload.attachmentName,
+            attachmentSha256 = payload.attachmentSha256,
+            durationMillis = payload.durationMillis,
             sentAt = envelope.sentAt,
             status = DeliveryStatus.DELIVERED,
             replyTo = payload.replyTo,
@@ -269,6 +415,7 @@ class BrotherhoodRepository(
                 messages = (state.messages + message).takeLast(MAX_MESSAGES),
                 receivedMessageIds = replay.snapshot(),
                 groups = groups,
+                incomingVoiceTransfers = incomingTransfers,
             ),
         )
         crypto.createReceipt(identity, envelope.messageId)
@@ -377,6 +524,24 @@ class BrotherhoodRepository(
         )
     }
 
+    suspend fun saveTorIdentity(torIdentity: TorIdentity) = mutate {
+        copy(
+            torIdentity = torIdentity,
+            torEndpointRevision = maxOf(torEndpointRevision, torIdentity.revision),
+        )
+    }
+
+    suspend fun revokeTorIdentity() = mutate {
+        copy(
+            torIdentity = null,
+            torEndpointRevision = torEndpointRevision + 1,
+        )
+    }
+
+    suspend fun setAvailabilityMode(mode: AvailabilityMode) = mutate {
+        copy(preferences = preferences.copy(availabilityMode = mode))
+    }
+
     suspend fun deleteAll() = mutex.withLock {
         store.deleteIdentityAndData()
         mutableState.value = AppState()
@@ -392,9 +557,29 @@ class BrotherhoodRepository(
         store.save(state)
     }
 
+    private fun voiceChunkCount(payload: MessagePayload): Int =
+        if (payload.kind == MessageKind.VOICE) AttachmentChunks.count(payload.attachmentBase64)
+        else 1
+
+    private fun preparePayloadForValidation(
+        payload: MessagePayload,
+        logicalMessageId: String,
+    ): MessagePayload {
+        if (payload.kind != MessageKind.VOICE) return payload
+        return payload.copy(
+            logicalMessageId = logicalMessageId,
+            attachmentChunkIndex = 0,
+            attachmentChunkCount = 1,
+            attachmentTotalBytes = AttachmentChunks.totalBytes(payload.attachmentBase64),
+        )
+    }
+
+    private fun Int?.orZero(): Int = this ?: 0
+
     companion object {
         private const val MAX_QUEUE = 1_000
         private const val MAX_MESSAGES = 5_000
+        private const val MAX_INCOMING_TRANSFERS = 8
         private const val MESSAGE_TTL_MS = 7L * 24 * 60 * 60 * 1000
     }
 }

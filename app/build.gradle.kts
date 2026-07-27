@@ -5,6 +5,17 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+val torBinaries by configurations.creating
+val torJniDirectory = layout.buildDirectory.dir("generated/torJniLibs")
+val unpackTorBinaries by tasks.registering(Sync::class) {
+    from(
+        torBinaries.elements.map { files ->
+            files.map { zipTree(it.asFile) }
+        },
+    )
+    into(torJniDirectory)
+}
+
 android {
     namespace = "org.brotherhood.app"
     compileSdk = 35
@@ -13,8 +24,8 @@ android {
         applicationId = "org.brotherhood.app"
         minSdk = 28
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0-alpha01"
+        versionCode = 2
+        versionName = "0.2.0-alpha02"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -47,11 +58,18 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        jniLibs.useLegacyPackaging = true
     }
 
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
+
+    sourceSets.getByName("main").jniLibs.srcDir(torJniDirectory)
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(unpackTorBinaries)
 }
 
 dependencies {
@@ -74,6 +92,9 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
+    implementation("org.briarproject:onionwrapper-android:0.1.6")
+    torBinaries("org.briarproject:tor-android:0.4.9.11")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation(kotlin("test"))

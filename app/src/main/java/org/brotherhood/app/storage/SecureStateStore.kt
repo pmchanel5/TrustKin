@@ -55,7 +55,7 @@ class SecureStateStore(context: Context) {
                 output.write(iv)
                 output.write(encrypted)
                 output.flush()
-                if (output is java.io.FileOutputStream) output.fd.sync()
+                output.fd.sync()
             }
             check(temp.renameTo(stateFile) || run {
                 stateFile.delete()

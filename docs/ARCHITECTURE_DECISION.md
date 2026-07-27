@@ -1,68 +1,70 @@
-# ADR-001 — Base tecnica Android e valutazione Briar
+# Decisioni architetturali
 
-**Stato:** accettata per la Fase 0  
+## ADR-001 — Applicazione Android indipendente
+
+**Stato:** accettata
+**Data:** 27 luglio 2026
+
+Il repository è stato migrato dal prototipo Python/browser a un APK Kotlin/Compose
+indipendente, senza backend Brotherhood. Briar è stato analizzato al commit
+`b46d008aceb4c9cea306df8299fcfc1b7ce79d21` (release 1.5.19), ma un fork completo o il
+riuso di `bramble-*` avrebbe importato un grafo ampio e API non progettate come SDK.
+
+La decisione resta:
+
+- codice applicativo Brotherhood indipendente e GPLv3+;
+- Tink per primitive locali/applicative;
+- archivio locale cifrato;
+- gruppi pairwise semplici;
+- nessun servizio centrale.
+
+Conseguenza accettata: il protocollo alpha è piccolo e ispezionabile, ma non eredita la
+maturità del protocollo Briar e non offre forward secrecy.
+
+## ADR-002 — Runtime Tor tramite Onion Wrapper
+
+**Stato:** accettata per `0.2.0-alpha02`, verifica su dispositivo pendente
 **Data:** 27 luglio 2026  
-**Briar analizzato:** commit `b46d008aceb4c9cea306df8299fcfc1b7ce79d21`,
-release 1.5.19.
+**Onion Wrapper:** 0.1.6
+**Tor Android:** 0.4.9.11
 
-## Contesto
+### Contesto
 
-Il repository Brotherhood conteneva un prototipo Python/browser con Cloudflare Quick
-Tunnel, dati del gruppo sul computer host e nessuna cifratura end-to-end. La nuova richiesta
-è un APK Android autonomo, senza server Brotherhood, con identità locale, inviti, Tor e
-trasporti locali.
+Servivano SOCKS locale, onion service v3, ciclo start/stop, eventi di bootstrap,
+persistenza della onion key, quattro ABI e compatibilità `minSdk 28`, senza implementare
+Tor manualmente né dipendere da servizi proprietari.
 
-È stato esaminato il repository ufficiale di
-[Briar](https://code.briarproject.org/briar/briar), incluso il codice Android, la licenza e
-la configurazione di build. La release analizzata usa una struttura ampia composta da
-`bramble-*`, `briar-*`, mailbox e test d’integrazione; dichiara `minSdk 21`, `targetSdk 35`,
-Tor 0.4.9.11 e licenza GNU GPL v3 o successiva. Briar documenta connessioni dirette tramite
-Tor, Wi-Fi e Bluetooth e un archivio locale cifrato.
+### Alternative
 
-## Opzioni
+| Opzione | Vantaggi | Costi/rischi |
+|---|---|---|
+| Fork Briar completo | protocolli e integrazione maturi | migrazione ampia, UI/DB/protocolli diversi |
+| Moduli interni Briar | componenti collaudati | non sono SDK isolati, forte accoppiamento |
+| Orbot esterno | aggiornamenti separati | dipendenza da app installata e IPC/UX esterni |
+| Onion Wrapper + tor-android in-process | API piccola, onion v3, nessun servizio proprietario | APK più grande, responsabilità lifecycle e patch |
+| Tor implementato in casa | nessuna dipendenza | non accettabile per sicurezza e manutenzione |
 
-| Criterio | Fork completo Briar | Riuso moduli Briar | Implementazione indipendente |
-|---|---|---|---|
-| Sicurezza di trasporto | Migliore base già collaudata | Buona, se l’integrazione resta corretta | Incompleta finché Tor non viene integrato e auditato |
-| Tempo per una UI Brotherhood compilabile | Alto: rinomina, rimozione forum/blog e migrazione UI | Alto: API interne molto accoppiate | Basso |
-| Manutenzione | Richiede seguire un progetto grande e le patch upstream | Richiede seguire API non pensate come SDK | Codice piccolo, responsabilità diretta |
-| Licenza | GPLv3+ obbligatoria, avvisi upstream | GPLv3+ e avvisi per i moduli riusati | Licenza scelta dal progetto; adottata GPLv3+ |
-| Tor/onion service | Già presente | Possibile tramite `bramble-android`, ma non plug-and-play | Da integrare e verificare |
-| Messaggi offline | Già presente; mailbox opzionale | Componenti disponibili ma interdipendenti | Coda mittente implementabile in modo semplice |
-| Gruppi | Protocolli Briar maturi | Forte dipendenza dal modello Briar | MVP pairwise semplice, non definitivo |
-| Immagini/vocali | Non allineato a tutti i requisiti Brotherhood | Richiede estensioni | Modellabili direttamente, con maggior lavoro |
-| Dimensione APK | Elevata per Tor e stack completo | Elevata | Piccola prima di Tor |
-| Android moderno/Compose | UI View esistente, Kotlin 1.9 | Adattatore Compose necessario | Compose e Material 3 nativi |
+### Decisione
 
-## Decisione
+Usare `org.briarproject:onionwrapper-android:0.1.6` e i binari
+`org.briarproject:tor-android:0.4.9.11`. Onion Wrapper è GPLv3 e compatibile con la licenza
+del progetto; `tor-android` dichiara BSD-3-Clause nei metadati. Il wrapper espone stato,
+bootstrap, padding, SOCKS/control port e onion service v3 con chiave riutilizzabile.
 
-Brotherhood parte come **implementazione indipendente GPLv3+**, senza copiare codice Briar.
-L’architettura di Briar viene usata come riferimento per la separazione tra identità,
-sincronizzazione, trasporti e UI. Non si riusano moduli in questa fase perché non sono un SDK
-isolato: trascinerebbero gran parte del grafo interno e renderebbero più lento ottenere una
-build Brotherhood comprensibile.
+Il protocollo Brotherhood resta sopra Tor: identità autorizzate, doppia firma, nonce,
+timestamp, replay, dimensioni, ricevute e coda non vengono delegati alla rete onion.
 
-La decisione privilegia una prima build installabile e ispezionabile. Ha però un costo
-esplicito: il trasporto Tor e un protocollo con forward secrecy non possono essere dichiarati
-completi. La build alpha implementa un trasporto LAN cifrato reale e mostra Tor come
-“non integrato”.
+### Conseguenze
 
-Prima della milestone remota si deve riaprire questa ADR e scegliere una delle due strade:
+- il JAR Tor viene estratto in `jniLibs` generati per quattro ABI;
+- onion key e indirizzo restano nell’archivio cifrato/no-backup;
+- l’indirizzo non è mostrato nella diagnostica;
+- l’APK cresce sensibilmente;
+- il processo può consumare batteria e memoria in modalità persistente;
+- dipendenze GPL/BSD sono registrate in `NOTICE.md`;
+- il codice compila, ma l’assenza di dispositivo impedisce di dichiarare bootstrap,
+  descriptor upload o scambio remoto verificati.
 
-1. integrare e mantenere i componenti Tor/Bramble rispettandone GPL e avvisi; oppure
-2. integrare un runtime Tor Android ufficialmente mantenuto e progettare il protocollo di
-   sessione con revisione esterna.
-
-Non è ammesso presentare un socket SOCKS o una schermata “Tor” come onion service funzionante
-senza test end-to-end su due dispositivi.
-
-## Conseguenze
-
-- nessun marchio, logo o codice Briar è incluso;
-- `NOTICE.md` registra Briar soltanto come progetto studiato;
-- il protocollo alpha usa Google Tink ECIES P-256 + AES-GCM e firme ECDSA P-256;
-- l’archivio locale usa una chiave AES Android Keystore;
-- i gruppi cifrano separatamente per ogni membro; rimuovere un membro esclude le consegne
-  future ma non revoca dati già ricevuti;
-- la release resta sperimentale finché Tor, forward secrecy, background mode, vocali e test
-  fisici non sono completati.
+La decisione va riesaminata se Onion Wrapper non riceve patch compatibili, se Tor
+0.4.9.11 presenta advisory non risolti o se un’integrazione ufficiale mantenuta offre un
+percorso più sicuro.

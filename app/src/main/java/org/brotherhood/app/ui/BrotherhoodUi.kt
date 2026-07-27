@@ -1,6 +1,8 @@
 package org.brotherhood.app.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.util.Base64
@@ -10,6 +12,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +49,9 @@ import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.QrCode2
@@ -65,6 +71,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -92,6 +99,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -102,12 +110,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import java.text.DateFormat
 import java.util.Date
+import org.brotherhood.app.BuildConfig
 import org.brotherhood.app.MainViewModel
 import org.brotherhood.app.model.AppState
 import org.brotherhood.app.model.ChatMessage
@@ -115,7 +125,10 @@ import org.brotherhood.app.model.Contact
 import org.brotherhood.app.model.DeliveryStatus
 import org.brotherhood.app.model.MessageKind
 import org.brotherhood.app.model.PrivateGroup
-import org.brotherhood.app.transport.LanStatus
+import org.brotherhood.app.model.AvailabilityMode
+import org.brotherhood.app.transport.RouterDiagnostics
+import org.brotherhood.app.transport.TransportPhase
+import org.brotherhood.app.transport.TransportState
 
 private val BrotherhoodColors = darkColorScheme(
     primary = androidx.compose.ui.graphics.Color(0xFF70D6B3),
@@ -144,6 +157,8 @@ fun BrotherhoodApp(viewModel: MainViewModel) {
     val busy by viewModel.busy.collectAsState()
     val notice by viewModel.notice.collectAsState()
     val lanStatus by viewModel.lanStatus.collectAsState()
+    val torStatus by viewModel.torStatus.collectAsState()
+    val routerDiagnostics by viewModel.routerDiagnostics.collectAsState()
     val snackbar = remember { SnackbarHostState() }
 
     LaunchedEffect(notice) {
@@ -158,7 +173,14 @@ fun BrotherhoodApp(viewModel: MainViewModel) {
             !initialized -> LoadingScreen()
             state.identity == null -> OnboardingScreen(viewModel)
             !unlocked -> UnlockScreen(state.identity?.displayName.orEmpty(), viewModel)
-            else -> MainShell(state, lanStatus, viewModel, snackbar)
+            else -> MainShell(
+                state,
+                lanStatus,
+                torStatus,
+                routerDiagnostics,
+                viewModel,
+                snackbar,
+            )
         }
         if (busy) {
             Box(
@@ -214,7 +236,7 @@ private fun OnboardingScreen(viewModel: MainViewModel) {
                 Spacer(Modifier.height(20.dp))
                 PrivacyPoint("Le chiavi private restano sul dispositivo")
                 PrivacyPoint("Gli inviti sostituiscono la ricerca pubblica")
-                PrivacyPoint("Questa versione usa collegamenti diretti sulla rete locale")
+                PrivacyPoint("Trasporto diretto in LAN o tramite onion service v3 Tor")
                 Spacer(Modifier.height(28.dp))
                 Button(onClick = { step = 1 }, modifier = Modifier.fillMaxWidth()) {
                     Text("Crea identità locale")
@@ -327,7 +349,9 @@ private enum class RootTab(val label: String) {
 @Composable
 private fun MainShell(
     state: AppState,
-    lanStatus: LanStatus,
+    lanStatus: TransportState,
+    torStatus: TransportState,
+    routerDiagnostics: RouterDiagnostics,
     viewModel: MainViewModel,
     snackbar: SnackbarHostState,
 ) {
@@ -432,7 +456,13 @@ private fun MainShell(
                         selectedId = it
                         route = "group"
                     }
-                    RootTab.SETTINGS -> SettingsScreen(state, lanStatus, viewModel)
+                    RootTab.SETTINGS -> SettingsScreen(
+                        state,
+                        lanStatus,
+                        torStatus,
+                        routerDiagnostics,
+                        viewModel,
+                    )
                 }
                 "add" -> AddContactScreen(viewModel) { id ->
                     selectedId = id
@@ -690,7 +720,8 @@ private fun InviteScreen(viewModel: MainViewModel) {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            "Questo invito contiene solo chiavi pubbliche, nome dichiarato e indirizzo LAN temporaneo.",
+            "L’invito contiene chiavi pubbliche e gli endpoint LAN/Tor firmati. " +
+                "Condividilo solo con il contatto previsto.",
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(18.dp))
@@ -736,7 +767,7 @@ private fun InviteScreen(viewModel: MainViewModel) {
                 Text("Genera un nuovo invito")
             }
         } else {
-            Text("Connettiti a una rete Wi-Fi per generare l’invito LAN.")
+            Text("Attendi che almeno il trasporto LAN o Tor sia disponibile.")
         }
     }
 }
@@ -795,14 +826,15 @@ private fun ChatScreen(
                 item {
                     Text(
                         "I messaggi sono cifrati per questo contatto. " +
-                            "La consegna avviene quando entrambi siete sulla stessa LAN e Brotherhood è aperta.",
+                            "Brotherhood prova prima la LAN e poi Tor. Se il destinatario non è " +
+                                "raggiungibile, il messaggio resta nella coda locale.",
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(18.dp),
                     )
                 }
             }
             items(messages, key = { it.id }) { message ->
-                MessageBubble(message, message.senderId == state.identity?.id)
+                MessageBubble(message, message.senderId == state.identity?.id, viewModel)
             }
         }
         Row(
@@ -814,6 +846,7 @@ private fun ChatScreen(
             IconButton(onClick = { imagePicker.launch("image/*") }) {
                 Icon(Icons.Default.AttachFile, "Invia immagine")
             }
+            VoiceRecordButton(contact.id, group = false, viewModel = viewModel)
             OutlinedTextField(
                 value = text,
                 onValueChange = { text = it.take(8_000) },
@@ -835,7 +868,97 @@ private fun ChatScreen(
 }
 
 @Composable
-private fun MessageBubble(message: ChatMessage, mine: Boolean) {
+private fun VoiceRecordButton(
+    targetId: String,
+    group: Boolean,
+    viewModel: MainViewModel,
+) {
+    val context = LocalContext.current
+    val recording by viewModel.voiceRecording.collectAsState()
+    var permissionGranted by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        permissionGranted = granted
+    }
+    if (!permissionGranted) {
+        IconButton(onClick = { permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) }) {
+            Icon(Icons.Default.Mic, "Consenti microfono")
+        }
+        return
+    }
+    var cancelled by remember { mutableStateOf(false) }
+    var horizontalDrag by remember { mutableStateOf(0f) }
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        if (recording.active) {
+            Text(
+                if (cancelled) "Rilascia per annullare" else formatDuration(recording.elapsedMillis),
+                style = MaterialTheme.typography.labelSmall,
+                color = if (cancelled) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+            )
+        }
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .pointerInput(targetId, group, permissionGranted) {
+                    detectDragGesturesAfterLongPress(
+                        onDragStart = {
+                            cancelled = false
+                            horizontalDrag = 0f
+                            if (
+                                ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.RECORD_AUDIO,
+                                ) == PackageManager.PERMISSION_GRANTED
+                            ) {
+                                viewModel.startVoiceRecording(targetId, group)
+                            } else {
+                                permissionGranted = false
+                            }
+                        },
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            horizontalDrag += dragAmount.x
+                            if (horizontalDrag < -90.dp.toPx()) cancelled = true
+                        },
+                        onDragEnd = {
+                            viewModel.finishVoiceRecording(cancelled)
+                            horizontalDrag = 0f
+                        },
+                        onDragCancel = {
+                            viewModel.finishVoiceRecording(cancel = true)
+                            horizontalDrag = 0f
+                        },
+                    )
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Default.Mic,
+                contentDescription = "Tieni premuto per registrare, trascina a sinistra per annullare",
+                tint = if (recording.active) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+            )
+        }
+    }
+}
+
+private fun formatDuration(durationMillis: Long): String {
+    val seconds = (durationMillis / 1_000).coerceAtLeast(0)
+    return "%d:%02d".format(seconds / 60, seconds % 60)
+}
+
+@Composable
+private fun MessageBubble(message: ChatMessage, mine: Boolean, viewModel: MainViewModel) {
+    val playback by viewModel.voicePlaybackState.collectAsState()
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
@@ -863,6 +986,33 @@ private fun MessageBubble(message: ChatMessage, mine: Boolean) {
                         )
                         Spacer(Modifier.height(8.dp))
                     }
+                }
+                if (message.kind == MessageKind.VOICE && message.attachmentBase64.isNotBlank()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { viewModel.playOrPauseVoice(message) }) {
+                            Icon(
+                                if (playback.messageId == message.id && playback.playing) {
+                                    Icons.Default.Pause
+                                } else {
+                                    Icons.Default.PlayArrow
+                                },
+                                contentDescription = "Riproduci o pausa",
+                            )
+                        }
+                        Column(Modifier.weight(1f)) {
+                            Text(formatDuration(message.durationMillis))
+                            if (playback.messageId == message.id && playback.durationMillis > 0) {
+                                LinearProgressIndicator(
+                                    progress = {
+                                        playback.positionMillis.toFloat() /
+                                            playback.durationMillis.toFloat()
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
                 }
                 if (message.body.isNotBlank() && message.kind != MessageKind.IMAGE) {
                     Text(message.body)
@@ -903,6 +1053,21 @@ private fun statusLabel(status: DeliveryStatus): String = when (status) {
     DeliveryStatus.TEMPORARY_FAILURE -> "offline · riprovo"
     DeliveryStatus.PERMANENT_FAILURE -> "non inviato"
     DeliveryStatus.EXPIRED -> "scaduto"
+}
+
+private fun torPhaseLabel(phase: TransportPhase): String = when (phase) {
+    TransportPhase.STOPPED -> "fermo"
+    TransportPhase.STARTING -> "avvio"
+    TransportPhase.CONNECTING -> "connessione"
+    TransportPhase.ONLINE -> "connesso"
+    TransportPhase.DEGRADED -> "attenzione"
+    TransportPhase.ERROR -> "errore"
+}
+
+private fun availabilityLabel(mode: AvailabilityMode): String = when (mode) {
+    AvailabilityMode.ALWAYS -> "Sempre disponibile"
+    AvailabilityMode.BALANCED -> "Bilanciata"
+    AvailabilityMode.WHEN_OPEN -> "Solo quando aperta"
 }
 
 @Composable
@@ -959,6 +1124,24 @@ private fun ContactDetailsScreen(contact: Contact, viewModel: MainViewModel, onR
                 checked = contact.blocked,
                 onCheckedChange = { viewModel.blockContact(contact.id, it) },
             )
+        }
+        if (contact.torOnion.isNotBlank()) {
+            Row(
+                Modifier.fillMaxWidth().padding(top = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Usa endpoint Tor")
+                    Text(
+                        "Puoi revocarlo localmente senza mostrare l’indirizzo.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Switch(
+                    checked = !contact.torEndpointRevoked,
+                    onCheckedChange = { viewModel.setContactTorRevoked(contact.id, !it) },
+                )
+            }
         }
         OutlinedButton(
             onClick = { confirmDelete = true },
@@ -1092,7 +1275,7 @@ private fun GroupChatScreen(state: AppState, group: PrivateGroup, viewModel: Mai
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             items(messages, key = { it.id }) { message ->
-                MessageBubble(message, message.senderId == state.identity?.id)
+                MessageBubble(message, message.senderId == state.identity?.id, viewModel)
             }
         }
         Row(
@@ -1102,6 +1285,7 @@ private fun GroupChatScreen(state: AppState, group: PrivateGroup, viewModel: Mai
             IconButton(onClick = { imagePicker.launch("image/*") }) {
                 Icon(Icons.Default.AttachFile, "Invia immagine")
             }
+            VoiceRecordButton(group.id, group = true, viewModel = viewModel)
             OutlinedTextField(
                 value = text,
                 onValueChange = { text = it.take(8_000) },
@@ -1125,10 +1309,34 @@ private fun GroupChatScreen(state: AppState, group: PrivateGroup, viewModel: Mai
 @Composable
 private fun SettingsScreen(
     state: AppState,
-    lanStatus: LanStatus,
+    lanStatus: TransportState,
+    torStatus: TransportState,
+    routerDiagnostics: RouterDiagnostics,
     viewModel: MainViewModel,
 ) {
+    val context = LocalContext.current
     var deleteDialog by remember { mutableStateOf(false) }
+    var rotateTorDialog by remember { mutableStateOf(false) }
+    var pendingAvailability by remember { mutableStateOf<AvailabilityMode?>(null) }
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) pendingAvailability?.let(viewModel::setAvailabilityMode)
+        pendingAvailability = null
+    }
+    fun selectAvailability(mode: AvailabilityMode) {
+        if (
+            mode == AvailabilityMode.ALWAYS &&
+            android.os.Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingAvailability = mode
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            viewModel.setAvailabilityMode(mode)
+        }
+    }
     Column(
         Modifier
             .fillMaxSize()
@@ -1138,22 +1346,71 @@ private fun SettingsScreen(
         SectionHeader("Impostazioni", "Privacy, rete e progetto")
         SettingsCard(Icons.Default.Wifi, "Stato rete") {
             Text(
-                if (lanStatus.listening) {
-                    "LAN attiva: ${lanStatus.address.ifBlank { "indirizzo non disponibile" }}:${lanStatus.port}"
+                if (lanStatus.phase == TransportPhase.ONLINE) {
+                    "LAN attiva: ${lanStatus.listeningAddress.ifBlank { "indirizzo non disponibile" }}:" +
+                        "${lanStatus.listeningPort}"
                 } else {
                     "LAN non in ascolto"
                 },
             )
             Text(
-                "Tor: non integrato in questa build. Nessun traffico viene instradato su server Brotherhood.",
+                "Tor: ${torPhaseLabel(torStatus.phase)} · bootstrap ${torStatus.bootstrapPercent}%",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Text(
+                if (torStatus.onionServiceReady) {
+                    "Onion service v3 pubblicato"
+                } else {
+                    "Onion service non ancora pubblicato"
+                },
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                "Integrazione Tor compilata, non verificata su dispositivo.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            routerDiagnostics.lastTransport?.let {
+                Text("Ultima consegna tecnica: ${it.name}", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        SettingsCard(Icons.Default.Settings, "Disponibilità") {
+            Text(
+                "La modalità bilanciata non garantisce ricezione immediata.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            AvailabilityMode.entries.forEach { mode ->
+                val selected = state.preferences.availabilityMode == mode
+                if (selected) {
+                    Button(
+                        onClick = { selectAvailability(mode) },
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    ) { Text(availabilityLabel(mode)) }
+                } else {
+                    OutlinedButton(
+                        onClick = { selectAvailability(mode) },
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    ) { Text(availabilityLabel(mode)) }
+                }
+            }
         }
         SettingsCard(Icons.Default.Security, "Privacy e sicurezza") {
             Text("Archivio locale cifrato con chiave Android Keystore")
             Text("Backup Android disabilitato · anteprime riservate")
             Text("Nessuna telemetria, rubrica o analytics")
+            OutlinedButton(
+                onClick = { rotateTorDialog = true },
+                enabled = torStatus.phase != TransportPhase.STARTING &&
+                    torStatus.phase != TransportPhase.CONNECTING,
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            ) {
+                Text("Rigenera endpoint Tor")
+            }
+            Text(
+                "Il vecchio endpoint viene revocato localmente. I contatti richiedono un nuovo invito firmato.",
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
         SettingsCard(Icons.Default.Person, "Identità") {
             Text(state.identity?.displayName.orEmpty(), fontWeight = FontWeight.SemiBold)
@@ -1165,11 +1422,25 @@ private fun SettingsScreen(
             }
         }
         SettingsCard(Icons.Default.Info, "Open source e diagnostica") {
-            Text("Brotherhood 0.1.0-alpha01 · GNU GPLv3")
+            Text(
+                "Brotherhood ${BuildConfig.VERSION_NAME} · " +
+                    "${if (BuildConfig.DEBUG) "DEBUG" else "RELEASE"} · GNU GPLv3",
+            )
             Text(
                 "Coda: ${state.outbound.size} · contatti: ${state.contacts.size} · messaggi: ${state.messages.size}",
                 style = MaterialTheme.typography.bodySmall,
             )
+            Text(
+                "Retry totali in coda: ${state.outbound.sumOf { it.attempts }} · " +
+                    "identità: ${state.identity?.id?.take(8).orEmpty()}",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (routerDiagnostics.lastError.isNotBlank()) {
+                Text(
+                    "Ultimo errore tecnico: ${routerDiagnostics.lastError.take(80)}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             Text(
                 "Build sperimentale, non sottoposta ad audit di sicurezza.",
                 color = MaterialTheme.colorScheme.error,
@@ -1204,6 +1475,29 @@ private fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { deleteDialog = false }) { Text("Annulla") }
+            },
+        )
+    }
+    if (rotateTorDialog) {
+        AlertDialog(
+            onDismissRequest = { rotateTorDialog = false },
+            title = { Text("Rigenerare l’endpoint Tor?") },
+            text = {
+                Text(
+                    "Il vecchio indirizzo non sarà più usato. Dovrai condividere un nuovo " +
+                        "invito firmato con ogni contatto.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        rotateTorDialog = false
+                        viewModel.rotateTorIdentity()
+                    },
+                ) { Text("Rigenera") }
+            },
+            dismissButton = {
+                TextButton(onClick = { rotateTorDialog = false }) { Text("Annulla") }
             },
         )
     }

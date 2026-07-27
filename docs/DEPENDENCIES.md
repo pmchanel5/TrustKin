@@ -1,21 +1,41 @@
 # Dipendenze
 
-Sono usati solo Google Maven, Maven Central e Gradle Plugin Portal. Le versioni dirette sono
-fissate nei file Gradle e le risoluzioni transitive sono registrate in
-`app/gradle.lockfile`; non esistono repository Maven sconosciuti. Il wrapper Gradle verifica
-anche lo SHA-256 della distribuzione 8.9 prima di eseguirla.
+Sono ammessi soltanto Google Maven, Maven Central e Gradle Plugin Portal. Le versioni
+dirette sono fissate in Gradle e le risoluzioni transitive in `app/gradle.lockfile`. Il
+wrapper verifica lo SHA-256 della distribuzione Gradle 8.9.
 
-| Dipendenza | Autore/licenza | Versione | Motivo | Stato/alternativa |
-|---|---|---:|---|---|
-| Android Gradle Plugin | Google / Apache-2.0 | 8.7.3 | build Android | mantenuto; nessuna alternativa equivalente |
-| Kotlin + serialization + coroutines | JetBrains / Apache-2.0 | 2.0.21, 1.7.3, 1.9.0 | linguaggio, JSON, concorrenza | mantenuti; Java puro aumenterebbe complessità |
-| AndroidX Core/Activity/Lifecycle/ExifInterface | Android Open Source Project / Apache-2.0 | fissate in Gradle | lifecycle, Compose host, lettura orientamento EXIF | mantenute |
-| Jetpack Compose + Material 3 | Google / Apache-2.0 | BOM 2024.12.01 | UI Android | mantenuto; View XML è alternativa |
-| Google Tink Android | Google / Apache-2.0 | 1.16.0 | primitive ECIES, ECDSA, AES-GCM | mantenuto; libsignal da rivalutare per sessioni |
-| ZXing Core | ZXing / Apache-2.0 | 3.5.3 | generazione QR | mantenuto |
-| ZXing Android Embedded | JourneyApps / Apache-2.0 | 4.3.0 | scansione QR locale | stabile; CameraX+ZXing riduce dipendenza futura |
-| JUnit | JUnit / EPL-1.0 | 4.13.2 | test JVM | stabile |
+| Dipendenza | Versione | Licenza dichiarata | Uso |
+|---|---:|---|---|
+| Android Gradle Plugin | 8.7.3 | Apache-2.0 | build Android |
+| Kotlin | 2.0.21 | Apache-2.0 | linguaggio e plugin |
+| Coroutines / Serialization | 1.9.0 / 1.7.3 | Apache-2.0 | concorrenza e JSON |
+| AndroidX / Compose / Material 3 | versioni bloccate, BOM 2024.12.01 | Apache-2.0 | UI, lifecycle, WorkManager |
+| WorkManager | 2.10.0 | Apache-2.0 | modalità Bilanciata |
+| Google Tink Android | 1.16.0 | Apache-2.0 | ECIES, ECDSA, AES-GCM |
+| ZXing | 3.5.3 / 4.3.0 | Apache-2.0 | QR locale |
+| Onion Wrapper Android | 0.1.6 | GPLv3 | controllo Tor e onion service v3 |
+| Do not kill me library | 0.2.7 transitiva | GPLv3 | wake lock richiesto dal wrapper |
+| tor-android | 0.4.9.11 | BSD-3-Clause nei metadati Maven | `libtor.so` per quattro ABI |
+| JUnit / Kotlin test | 4.13.2 / 2.0.21 | EPL-1.0 / Apache-2.0 | test JVM |
 
-Le dipendenze transitive devono essere riesaminate prima di ogni release. Dependabot è
-configurato per segnalare aggiornamenti; gli aggiornamenti crittografici non devono essere
-applicati senza test di compatibilità dei keyset esistenti.
+## Valutazione Tor
+
+La scelta è documentata in [TOR_INTEGRATION.md](TOR_INTEGRATION.md). Onion Wrapper è
+pubblicato dal Briar Project, supporta `minSdk` inferiore a 28 e fornisce start/stop,
+observer, SOCKS/control port e `ADD_ONION` v3. Il runtime 0.4.9.11 è lo stesso ramo
+analizzato nel repository Briar al momento dell’iterazione.
+
+Il JAR `tor-android` aggiunge circa 14 MB compressi prima del packaging e contiene binari
+per `armeabi-v7a`, `arm64-v8a`, `x86` e `x86_64`. La dimensione finale va rivalutata prima
+di una release stabile, eventualmente con APK per ABI.
+
+## Vulnerabilità e aggiornamenti
+
+Nell’ambiente locale non era disponibile un database CVE affidabile aggiornato; non viene
+quindi dichiarata l’assenza di vulnerabilità note. Dependabot resta attivo e la CI produce
+un grafo bloccato. Prima della pubblicazione occorre confrontare Tor, Onion Wrapper, Tink,
+AndroidX e toolchain con gli advisory correnti.
+
+Non applicare automaticamente aggiornamenti di Tink o Tor: verificare compatibilità di
+keyset, archivi, onion key, ABI e comportamento background. Ogni variazione del lock deve
+essere revisionata.

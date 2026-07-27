@@ -1,38 +1,66 @@
 # Test
 
-## Automatici
+## Automatici JVM
 
 ```powershell
-.\gradlew.bat testDebugUnitTest lintDebug
+.\gradlew.bat --no-daemon testDebugUnitTest
 ```
 
-I test coprono:
+Copertura attuale:
 
-- generazione identità, firma/verifica e round-trip cifrato;
-- rifiuto del ciphertext modificato;
-- serializzazione dei payload;
-- replay, capienza della finestra e deduplicazione;
-- retry esponenziale con limite;
-- frammentazione, ricostruzione e integrità SHA-256.
+- generazione identità, inviti firmati, endpoint Tor e invito Tor-only;
+- cifratura/decifratura, firma, ciphertext alterato e handshake alterato;
+- migrazione schema alpha01 → alpha02 e serializzazione dello stato;
+- replay, capienza della finestra, retry e backoff;
+- preferenza LAN → Tor, riuso della stessa frame e arresto dopo ricevuta valida;
+- rate limiting per sorgente e globale;
+- validazione di testo, immagini e vocali;
+- frammentazione vocale, arrivo fuori ordine, SHA-256, gruppo e ripresa dopo
+  serializzazione/riavvio simulato;
+- regole di rimozione dei membri dai gruppi;
+- selezione predefinita **Bilanciata**.
 
-I vecchi test Python restano eseguibili separatamente:
+Questi sono test JVM. Non dimostrano che Tor, microfono, socket, Keystore o scheduler
+funzionino su un telefono.
+
+## Test strumentali
+
+Compilazione senza dispositivo:
+
+```powershell
+.\gradlew.bat --no-daemon compileDebugAndroidTestKotlin
+```
+
+Esecuzione con dispositivo/emulatore:
+
+```powershell
+.\gradlew.bat --no-daemon connectedDebugAndroidTest
+```
+
+I test strumentali verificano:
+
+- eliminazione di un file vocale temporaneo abbandonato;
+- servizio foreground non esportato e tipo `remoteMessaging`.
+
+Keystore, registrazione/riproduzione, boot, WorkManager e scambio Tor richiedono ulteriori
+test d’integrazione su dispositivo. Vedi
+[TWO_DEVICE_TEST_PLAN.md](TWO_DEVICE_TEST_PLAN.md).
+
+## Lint e build
+
+```powershell
+.\gradlew.bat --no-daemon lintDebug assembleDebug assembleRelease
+```
+
+Un test superato non autorizza a dichiarare “Tor testato”: occorre osservare bootstrap,
+descriptor onion e consegna fra due reti reali.
+
+## Codice legacy
+
+I test del prototipo Python sono separati dall’APK Android:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-## Matrice manuale richiesta
-
-Usare due emulatori o telefoni con dati applicazione separati:
-
-1. creare due identità e scambiarsi gli inviti in entrambe le direzioni;
-2. confrontare le impronte;
-3. inviare testo con entrambi aperti sulla stessa LAN;
-4. chiudere il destinatario, inviare, riaprirlo e attendere il retry;
-5. interrompere e ripristinare Wi-Fi;
-6. riavviare app e telefono e verificare persistenza;
-7. inviare una foto con GPS/EXIF noto e verificare l’output;
-8. creare un gruppo con tre identità e rimuovere un membro.
-
-Non ancora verificato in questo ambiente: emulatori, telefoni fisici, riavvio dispositivo,
-reti con client isolation e produttori Android diversi.
+Non costituiscono copertura della nuova architettura.

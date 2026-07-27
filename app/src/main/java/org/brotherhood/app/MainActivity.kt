@@ -30,4 +30,14 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         intent.dataString?.let(viewModel::acceptDeepLink)
     }
+
+    override fun onStart() {
+        super.onStart()
+        viewModel.onAppForeground()
+    }
+
+    override fun onStop() {
+        viewModel.onAppBackground()
+        super.onStop()
+    }
 }
