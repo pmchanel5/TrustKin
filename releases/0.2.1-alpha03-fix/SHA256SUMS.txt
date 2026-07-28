@@ -1,0 +1,1 @@
+286fe6e8b447249ff937f539f89cf7f7577124791dfaf77542aa824638bdacdb  releases/0.2.1-alpha03-fix/Brotherhood-0.2.1-alpha03-fix-debug.apk
