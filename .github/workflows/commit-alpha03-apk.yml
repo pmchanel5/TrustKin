@@ -1,0 +1,51 @@
+name: Commit alpha03 APK to main
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/commit-alpha03-apk.yml"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  commit-apk:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Download the verified alpha03 artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/8664797320/zip" \
+            > alpha03-artifact.zip
+          mkdir alpha03-artifact
+          unzip -q alpha03-artifact.zip -d alpha03-artifact
+
+      - name: Copy APK and checksum into the repository
+        run: |
+          mkdir -p releases/0.2.1-alpha03-fix
+          APK_PATH="$(find alpha03-artifact -type f -name 'Brotherhood-0.2.1-alpha03-fix-debug.apk' -print -quit)"
+          test -n "$APK_PATH"
+          cp "$APK_PATH" releases/0.2.1-alpha03-fix/Brotherhood-0.2.1-alpha03-fix-debug.apk
+          sha256sum releases/0.2.1-alpha03-fix/Brotherhood-0.2.1-alpha03-fix-debug.apk \
+            > releases/0.2.1-alpha03-fix/SHA256SUMS.txt
+
+      - name: Commit APK directly to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f releases/0.2.1-alpha03-fix/Brotherhood-0.2.1-alpha03-fix-debug.apk
+          git add releases/0.2.1-alpha03-fix/SHA256SUMS.txt
+          git commit -m "chore: add Brotherhood 0.2.1 alpha03 APK [skip ci]"
+          git push origin HEAD:main
