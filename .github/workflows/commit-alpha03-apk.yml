@@ -49,3 +49,5 @@ jobs:
           git add releases/0.2.1-alpha03-fix/SHA256SUMS.txt
           git commit -m "chore: add Brotherhood 0.2.1 alpha03 APK [skip ci]"
           git push origin HEAD:main
+
+# Triggered explicitly after verifying that the APK was absent from main.
