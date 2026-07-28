@@ -69,7 +69,27 @@ interface MessageTransport {
 
 object TransportPolicy {
     fun preferredOrder(endpoint: RecipientEndpoint): List<TransportType> = buildList {
-        if (endpoint.lanHost.isNotBlank() && endpoint.lanPort in 1..65535) add(TransportType.LAN)
+        if (
+            LanEndpointPolicy.isAdvertisable(endpoint.lanHost) &&
+            endpoint.lanPort in 1..65535
+        ) {
+            add(TransportType.LAN)
+        }
         if (!endpoint.torRevoked && endpoint.torOnion.isNotBlank()) add(TransportType.TOR)
     }
+}
+
+/**
+ * Legacy Android emulator instances use these guest-only addresses behind
+ * isolated virtual routers. Without an explicit host-side port forwarding
+ * rule, another emulator or physical phone cannot reach them.
+ */
+object LanEndpointPolicy {
+    private val isolatedEmulatorAddresses = setOf("10.0.2.15", "10.0.2.16")
+
+    fun isAdvertisable(host: String): Boolean =
+        host.isNotBlank() && !isIsolatedEmulatorAddress(host)
+
+    fun isIsolatedEmulatorAddress(host: String): Boolean =
+        host.trim() in isolatedEmulatorAddresses
 }

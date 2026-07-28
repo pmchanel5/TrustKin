@@ -25,10 +25,18 @@ class BalancedDeliveryWorker(
                 app.deliveryEngine.drainDueQueue()
                 if (
                     app.repository.dueOutbound().isNotEmpty() &&
-                    app.torTransport.state.value.phase == TransportPhase.CONNECTING
+                    app.torTransport.state.value.phase in setOf(
+                        TransportPhase.STARTING,
+                        TransportPhase.CONNECTING,
+                    )
                 ) {
                     withTimeoutOrNull(TOR_WAIT_MS) {
-                        while (app.torTransport.state.value.phase == TransportPhase.CONNECTING) {
+                        while (
+                            app.torTransport.state.value.phase in setOf(
+                                TransportPhase.STARTING,
+                                TransportPhase.CONNECTING,
+                            )
+                        ) {
                             delay(1_000)
                         }
                     }

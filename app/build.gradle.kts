@@ -95,6 +95,7 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("org.briarproject:onionwrapper-android:0.1.6")
     torBinaries("org.briarproject:tor-android:0.4.9.11")
+    torBinaries("org.briarproject:lyrebird-android:0.6.2")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation(kotlin("test"))

@@ -6,8 +6,8 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 
 class TransportRuntimeController(
-    private val lan: LanTransport,
-    private val tor: TorTransport,
+    private val lan: MessageTransport,
+    private val tor: MessageTransport,
 ) {
     private val mutex = Mutex()
     private val owners = linkedSetOf<String>()
@@ -15,18 +15,21 @@ class TransportRuntimeController(
     suspend fun acquire(owner: String) = mutex.withLock {
         val wasEmpty = owners.isEmpty()
         owners += owner
-        if (wasEmpty) {
-            try {
-                lan.start()
-                tor.start()
-            } catch (t: Throwable) {
+        try {
+            // Healthy transports return immediately. Repeating start for an
+            // existing owner also recovers a transport that exited or failed
+            // after the owner was first registered.
+            lan.start()
+            tor.start()
+        } catch (t: Throwable) {
+            if (wasEmpty) {
                 owners -= owner
                 withContext(NonCancellable) {
                     tor.stop()
                     lan.stop()
                 }
-                throw t
             }
+            throw t
         }
     }
 

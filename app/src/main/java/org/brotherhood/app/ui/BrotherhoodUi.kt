@@ -126,6 +126,7 @@ import org.brotherhood.app.model.DeliveryStatus
 import org.brotherhood.app.model.MessageKind
 import org.brotherhood.app.model.PrivateGroup
 import org.brotherhood.app.model.AvailabilityMode
+import org.brotherhood.app.transport.LanEndpointPolicy
 import org.brotherhood.app.transport.RouterDiagnostics
 import org.brotherhood.app.transport.TransportPhase
 import org.brotherhood.app.transport.TransportState
@@ -710,8 +711,16 @@ private fun AddContactScreen(viewModel: MainViewModel, onImported: (String) -> U
 private fun InviteScreen(viewModel: MainViewModel) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    val lanStatus by viewModel.lanStatus.collectAsState()
+    val torStatus by viewModel.torStatus.collectAsState()
     var invite by remember { mutableStateOf("") }
-    LaunchedEffect(Unit) { invite = viewModel.createInvite() }
+    LaunchedEffect(
+        lanStatus.listeningAddress,
+        lanStatus.listeningPort,
+        torStatus.onionServiceReady,
+    ) {
+        invite = viewModel.createInvite()
+    }
     Column(
         Modifier
             .fillMaxSize()
@@ -768,6 +777,12 @@ private fun InviteScreen(viewModel: MainViewModel) {
             }
         } else {
             Text("Attendi che almeno il trasporto LAN o Tor sia disponibile.")
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(onClick = { invite = viewModel.createInvite() }) {
+                Icon(Icons.Default.Refresh, null)
+                Spacer(Modifier.width(6.dp))
+                Text("Riprova")
+            }
         }
     }
 }
@@ -1353,11 +1368,25 @@ private fun SettingsScreen(
                     "LAN non in ascolto"
                 },
             )
+            if (LanEndpointPolicy.isIsolatedEmulatorAddress(lanStatus.listeningAddress)) {
+                Text(
+                    "LAN emulatore isolata: questo indirizzo non viene incluso negli inviti.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             Text(
                 "Tor: ${torPhaseLabel(torStatus.phase)} · bootstrap ${torStatus.bootstrapPercent}%",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (torStatus.lastError.isNotBlank()) {
+                Text(
+                    "Errore Tor: ${torStatus.lastError.take(160)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             Text(
                 if (torStatus.onionServiceReady) {
                     "Onion service v3 pubblicato"
