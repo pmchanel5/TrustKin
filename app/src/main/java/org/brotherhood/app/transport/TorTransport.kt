@@ -46,66 +46,74 @@ class TorTransport(
     private var socksPort: Int = 0
     private var publishedOnion = ""
     private var descriptorUploaded = false
+    @Volatile
+    private var stopRequested = false
+    @Volatile
+    private var startupFailure = ""
 
     override suspend fun start() {
         lifecycleMutex.withLock {
-            if (wrapper?.isTorRunning == true) return
+            if (wrapper?.isTorRunning == true) return@withLock
+            stopRequested = false
+            startupFailure = ""
             mutableState.value = TransportState(phase = TransportPhase.STARTING)
             withContext(Dispatchers.IO) {
                 runCatching {
-                val architecture = supportedArchitecture()
-                    ?: throw IllegalStateException("Architettura Android non supportata")
-                socksPort = findFreePort()
-                val controlPort = findFreePort(excluding = socksPort)
-                val torDirectory = application.noBackupFilesDir.resolve("tor-runtime").apply {
-                    if (!exists()) check(mkdirs()) { "Directory Tor non disponibile" }
-                }
-                val wakeLocks = AndroidWakeLockManagerFactory
-                    .createAndroidWakeLockManager(application)
-                val tor = AndroidTorWrapper(
-                    application,
-                    wakeLocks,
-                    ioExecutor,
-                    eventExecutor,
-                    architecture,
-                    torDirectory,
-                    socksPort,
-                    controlPort,
-                )
-                tor.setObserver(TorObserver())
-                wrapper = tor
-                tor.start()
-                tor.enableConnectionPadding(true)
-                val previous = repository.state.value.torIdentity
-                val hiddenService = tor.publishHiddenService(
-                    localServicePort,
-                    REMOTE_SERVICE_PORT,
-                    previous?.privateKey?.takeIf(String::isNotBlank),
-                )
-                publishedOnion = normalizeOnion(hiddenService.onion)
-                repository.saveTorIdentity(
-                    TorIdentity(
-                        onionAddress = publishedOnion,
-                        privateKey = hiddenService.privKey,
-                        revision = repository.state.value.torEndpointRevision,
-                        createdAt = previous?.createdAt ?: System.currentTimeMillis(),
-                    ),
-                )
-                tor.enableNetwork(true)
-                }.onFailure {
-                    mutableState.value = TransportState(
-                        phase = TransportPhase.ERROR,
-                        lastError = it.javaClass.simpleName,
-                        deviceVerified = false,
+                    val architecture = supportedArchitecture()
+                        ?: throw IllegalStateException("Architettura Android non supportata")
+                    socksPort = findFreePort()
+                    val controlPort = findFreePort(excluding = socksPort)
+                    val torDirectory = application.noBackupFilesDir.resolve("tor-runtime").apply {
+                        if (!exists()) check(mkdirs()) { "Directory Tor non disponibile" }
+                    }
+                    val wakeLocks = AndroidWakeLockManagerFactory
+                        .createAndroidWakeLockManager(application)
+                    val tor = AndroidTorWrapper(
+                        application,
+                        wakeLocks,
+                        ioExecutor,
+                        eventExecutor,
+                        architecture,
+                        torDirectory,
+                        socksPort,
+                        controlPort,
                     )
+                    tor.setObserver(TorObserver())
+                    wrapper = tor
+                    tor.start()
+                    tor.enableConnectionPadding(true)
+                    val previous = repository.state.value.torIdentity
+                    val hiddenService = tor.publishHiddenService(
+                        localServicePort,
+                        REMOTE_SERVICE_PORT,
+                        previous?.privateKey?.takeIf(String::isNotBlank),
+                    )
+                    publishedOnion = normalizeOnion(hiddenService.onion)
+                    repository.saveTorIdentity(
+                        TorIdentity(
+                            onionAddress = publishedOnion,
+                            privateKey = hiddenService.privKey,
+                            revision = repository.state.value.torEndpointRevision,
+                            createdAt = previous?.createdAt ?: System.currentTimeMillis(),
+                        ),
+                    )
+                    tor.enableNetwork(true)
+                }.onFailure { error ->
+                    startupFailure = failureLabel(error)
                     runCatching { wrapper?.stop() }
                     wrapper = null
+                    mutableState.value = TransportState(
+                        phase = if (stopRequested) TransportPhase.STOPPED else TransportPhase.ERROR,
+                        lastError = if (stopRequested) "" else startupFailure,
+                        deviceVerified = false,
+                    )
                 }
             }
         }
     }
 
     override suspend fun stop() = lifecycleMutex.withLock {
+        stopRequested = true
         val tor = wrapper ?: run {
             mutableState.value = TransportState(phase = TransportPhase.STOPPED)
             return
@@ -197,7 +205,7 @@ class TorTransport(
 
     private inner class TorObserver : TorWrapper.Observer {
         override fun onState(state: TorWrapper.TorState) {
-            val phase = when (state) {
+            val reportedPhase = when (state) {
                 TorWrapper.TorState.NOT_STARTED,
                 TorWrapper.TorState.STOPPED,
                 TorWrapper.TorState.DISABLED,
@@ -207,11 +215,26 @@ class TorTransport(
                 TorWrapper.TorState.CONNECTING -> TransportPhase.CONNECTING
                 TorWrapper.TorState.CONNECTED -> TransportPhase.ONLINE
             }
+            val failed = startupFailure.isNotBlank()
+            val unexpectedlyStopped =
+                reportedPhase == TransportPhase.STOPPED && !stopRequested && !failed
+            val phase = when {
+                stopRequested -> TransportPhase.STOPPED
+                failed || unexpectedlyStopped -> TransportPhase.ERROR
+                else -> reportedPhase
+            }
+            val error = when {
+                stopRequested -> ""
+                failed -> startupFailure
+                unexpectedlyStopped -> "TorStoppedUnexpectedly"
+                phase == TransportPhase.ONLINE -> ""
+                else -> mutableState.value.lastError
+            }
             mutableState.value = mutableState.value.copy(
                 phase = phase,
                 onionServiceReady = descriptorUploaded,
                 deviceVerified = false,
-                lastError = "",
+                lastError = error,
             )
         }
 
@@ -258,6 +281,16 @@ class TorTransport(
 
     private fun normalizeOnion(value: String): String =
         value.lowercase().let { if (it.endsWith(".onion")) it else "$it.onion" }
+
+    private fun failureLabel(error: Throwable): String {
+        val type = error.javaClass.simpleName.ifBlank { "TorStartFailure" }
+        val detail = error.message
+            ?.replace(Regex("[\\r\\n\\t]+"), " ")
+            ?.trim()
+            ?.take(120)
+            .orEmpty()
+        return if (detail.isBlank()) type else "$type: $detail"
+    }
 
     companion object {
         private const val REMOTE_SERVICE_PORT = 80

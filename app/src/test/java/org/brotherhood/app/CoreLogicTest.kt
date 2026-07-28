@@ -24,6 +24,7 @@ import org.brotherhood.app.model.Contact
 import org.brotherhood.app.model.MessageKind
 import org.brotherhood.app.model.MessagePayload
 import org.brotherhood.app.storage.StateMigrations
+import org.brotherhood.app.transport.LanEndpointPolicy
 import org.brotherhood.app.transport.RecipientEndpoint
 import org.brotherhood.app.transport.RequestRateLimiter
 import org.brotherhood.app.transport.TransportPolicy
@@ -137,6 +138,24 @@ class CoreLogicTest {
         assertEquals(
             listOf(TransportType.LAN),
             TransportPolicy.preferredOrder(both.copy(torRevoked = true)),
+        )
+    }
+
+    @Test
+    fun isolatedEmulatorLanEndpointIsNeverAdvertisedOrRouted() {
+        assertFalse(LanEndpointPolicy.isAdvertisable("10.0.2.15"))
+        assertFalse(LanEndpointPolicy.isAdvertisable("10.0.2.16"))
+        assertTrue(LanEndpointPolicy.isAdvertisable("192.168.1.42"))
+        assertEquals(
+            listOf(TransportType.TOR),
+            TransportPolicy.preferredOrder(
+                RecipientEndpoint(
+                    contactId = "bob",
+                    lanHost = "10.0.2.15",
+                    lanPort = 42337,
+                    torOnion = "a".repeat(56) + ".onion",
+                ),
+            ),
         )
     }
 

@@ -21,6 +21,7 @@ import org.brotherhood.app.model.ImportInviteResult
 import org.brotherhood.app.model.MessageKind
 import org.brotherhood.app.model.MessagePayload
 import org.brotherhood.app.model.AvailabilityMode
+import org.brotherhood.app.transport.LanEndpointPolicy
 import org.brotherhood.app.transport.TransportResult
 import org.brotherhood.app.background.BackgroundModeManager
 
@@ -41,6 +42,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val notice: StateFlow<String?> = mutableNotice.asStateFlow()
     private val mutablePendingInvite = MutableStateFlow<String?>(null)
     val pendingInvite: StateFlow<String?> = mutablePendingInvite.asStateFlow()
+    private val appInForeground = AtomicBoolean(false)
     private val retryRunning = AtomicBoolean(false)
     private val voiceFinalizing = AtomicBoolean(false)
     private val voiceRecorder = VoiceMessageRecorder(application)
@@ -56,14 +58,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .onFailure { mutableNotice.value = "Archivio locale non leggibile" }
             mutableInitialized.value = true
             if (app.repository.state.value.identity != null) {
-                app.runtimeController.acquire(UI_OWNER)
                 BackgroundModeManager.configure(
                     app,
                     app.repository.state.value.preferences.availabilityMode,
                 )
             }
             while (true) {
-                retryQueue()
+                if (appInForeground.get()) retryQueue()
                 delay(15_000)
             }
         }
@@ -117,7 +118,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun createInvite(): String = runCatching {
         val status = lanStatus.value
-        val host = status.listeningAddress.ifBlank { app.lanTransport.currentIpv4Address() }
+        val detectedHost =
+            status.listeningAddress.ifBlank { app.lanTransport.currentIpv4Address() }
+        val host = detectedHost.takeIf(LanEndpointPolicy::isAdvertisable).orEmpty()
+        val torReady =
+            torStatus.value.onionServiceReady &&
+                app.repository.state.value.torIdentity != null
+        check(host.isNotBlank() || torReady) {
+            if (LanEndpointPolicy.isIsolatedEmulatorAddress(detectedHost)) {
+                "BlueStacks isola l'indirizzo LAN $detectedHost. Attendi che Tor sia online prima di condividere l'invito."
+            } else {
+                "Nessun endpoint raggiungibile. Attendi la rete LAN o Tor."
+            }
+        }
+        if (host.isBlank()) {
+            mutableNotice.value = "Invito Tor: la LAN isolata dell'emulatore è stata esclusa."
+        }
         app.repository.createInvite(host, status.listeningPort.takeIf { it > 0 } ?: 42337)
     }.getOrElse {
         mutableNotice.value = it.message ?: "Invito non disponibile"
@@ -317,15 +333,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onAppForeground() {
+        appInForeground.set(true)
         viewModelScope.launch {
             app.ensureInitialized()
             if (app.repository.state.value.identity != null) {
                 app.runtimeController.acquire(UI_OWNER)
+                retryQueue()
             }
         }
     }
 
     fun onAppBackground() {
+        appInForeground.set(false)
         viewModelScope.launch { app.runtimeController.release(UI_OWNER) }
     }
 
@@ -349,8 +368,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun retryQueue() {
+        if (!appInForeground.get()) return
         if (!retryRunning.compareAndSet(false, true)) return
         try {
+            if (app.repository.state.value.identity != null) {
+                app.runtimeController.acquire(UI_OWNER)
+            }
             app.deliveryEngine.drainDueQueue()
         } finally {
             retryRunning.set(false)
@@ -365,6 +388,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        appInForeground.set(false)
         voiceStartJob?.cancel()
         voiceRecorder.close()
         voicePlayback.close()

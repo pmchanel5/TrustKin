@@ -48,6 +48,7 @@ class BrotherhoodForegroundService : Service() {
                 app.runtimeController.acquire(OWNER)
                 acquired.set(true)
                 while (isActive) {
+                    app.runtimeController.acquire(OWNER)
                     app.deliveryEngine.drainDueQueue()
                     updateNotification(app)
                     delay(15_000)
