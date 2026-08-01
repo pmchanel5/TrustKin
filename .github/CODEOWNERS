@@ -1,0 +1,15 @@
+# Phase 0 approved maintainers.
+* @pmchanel5 @xMrBobo
+
+# Security-sensitive architecture and implementation boundaries.
+/docs/architecture/ @pmchanel5 @xMrBobo
+/crates/ @pmchanel5 @xMrBobo
+/apps/ @pmchanel5 @xMrBobo
+/services/ @pmchanel5 @xMrBobo
+/protocol/ @pmchanel5 @xMrBobo
+/tools/ @pmchanel5 @xMrBobo
+/.github/ @pmchanel5 @xMrBobo
+/SECURITY.md @pmchanel5 @xMrBobo
+/rust-toolchain.toml @pmchanel5 @xMrBobo
+/Cargo.lock @pmchanel5 @xMrBobo
+/**/gradle.lockfile @pmchanel5 @xMrBobo

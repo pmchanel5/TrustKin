@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TrustKin</string>
+    <string name="phase_zero_status">Architecture reset in progress</string>
+    <string name="phase_zero_explanation">This test-only shell establishes the new TrustKin package and build boundary. Secure messaging features will return only after their security gates pass.</string>
+</resources>

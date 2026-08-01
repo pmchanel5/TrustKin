@@ -1,19 +1,13 @@
-# Notice
+# Notices
 
-Copyright © 2026 Brotherhood contributors.
+TrustKin is licensed under GNU GPLv3 or later. See [LICENSE](LICENSE).
 
-Brotherhood è distribuita sotto GNU General Public License v3 o successiva.
+The Phase 0 Android shell uses AndroidX, Kotlin, and Jetpack Compose under their
+respective licenses. The Phase 0 Rust core uses only the Rust standard library.
 
-Il codice applicativo Brotherhood è un’implementazione indipendente e non è un fork di
-Briar. La versione alpha02 dipende tuttavia da:
+Future cryptographic, Tor, MLS, SQLCipher, media, and relay dependencies are not yet
+production dependencies. Each must pass the validation and licensing gates in the
+approved task plan before adoption.
 
-- **Onion Wrapper** `org.briarproject:onionwrapper-android:0.1.6`, pubblicato dal Briar
-  Project sotto GPLv3;
-- **Do not kill me library** `org.briarproject:dont-kill-me-lib:0.2.7`, dipendenza
-  transitiva pubblicata dal Briar Project sotto GPLv3;
-- **tor-android** `org.briarproject:tor-android:0.4.9.11`, binari Android del Tor Project
-  con metadati Maven BSD-3-Clause.
-
-Brotherhood non è affiliata al Briar Project o al Tor Project e non usa i loro marchi o
-loghi. Tutte le librerie mantengono copyright e licenze originali. Versioni, motivazioni e
-fonti sono elencate in [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md).
+Historical Brotherhood dependencies and notices are preserved by the immutable
+`brotherhood-v0.2.1-alpha03-fix` tag and release.

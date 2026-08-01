@@ -10,7 +10,11 @@ local.properties
 *.jks
 *.keystore
 *.apk
-app/build/
+**/build/
 captures/
 .idea/
+target/
+.cargo/
+*.log
+*.hprof
 artifacts/
