@@ -18,7 +18,7 @@ jobs:
     name: Repository policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Test policy tooling
         run: python3 -m unittest discover tools -p 'test_*.py'
       - name: Scan for forbidden secrets and active legacy code
@@ -33,7 +33,7 @@ jobs:
     name: Rust baseline
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Check formatting
@@ -47,13 +47,13 @@ jobs:
     name: Android baseline
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "17"
           cache: gradle
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
       - name: Verify dependency lock
         run: |
           ./gradlew --no-daemon --write-locks :apps:android:app:dependencies > dependency-report.txt
@@ -71,7 +71,7 @@ jobs:
           cp apps/android/app/build/outputs/apk/debug/app-debug.apk \
             artifacts/TrustKin-phase0-debug-test-only.apk
           sha256sum artifacts/*.apk > artifacts/SHA256SUMS.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: trustkin-phase0-test-only
           retention-days: 7
