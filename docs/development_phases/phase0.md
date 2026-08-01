@@ -34,7 +34,7 @@ protection.
 | `TK-P0-03` | Legacy Python, Cloudflare, Brotherhood Android protocol, static cryptography, old state, and checked-in APK paths are removed from the active tree. | Active-path search and build-graph checks pass; history remains available through the archive tag. |
 | `TK-P0-04` | Governance, CODEOWNERS, contribution, trademark, privacy, and security policies exist; the repository is public; private vulnerability reporting and branch protection are enabled. | Maintainer and protection settings verified through GitHub; the policy was approved by the project owner. |
 | `TK-P0-05` | Issue forms, labels, milestones, P0/P1 issues, and traceability validation are established. | YAML parsing and a live P0 issue traceability check pass. |
-| `TK-P0-06` | Pinned baseline CI for Rust, Android, policy, dependency locks, tests, lint, and secret patterns is implemented. | Local equivalents pass; required GitHub status contexts will be attached to `main` after their first PR run. |
+| `TK-P0-06` | Pinned baseline CI for Rust, Android, policy, dependency locks, tests, lint, and secret patterns is implemented. | Local equivalents and the first GitHub PR run pass; all three status contexts are required on protected `main`. |
 
 ## TK-P0-01: immutable Brotherhood archive
 
@@ -142,6 +142,12 @@ and lockfiles. Rust CI checks formatting, tests, and Clippy with warnings denied
 CI checks the dependency lock, unit tests, Android-test compilation, lint, and a
 test-only debug APK. No release keys are available to the workflow.
 
+Draft pull request 27 is the protected review path for this reset:
+<https://github.com/pmchanel5/TrustKin/pull/27>. Its first Baseline CI run completed
+successfully at <https://github.com/pmchanel5/TrustKin/actions/runs/30678680847>.
+`Repository policy`, `Rust baseline`, and `Android baseline` are now strict required
+status checks on `main`.
+
 `issue-traceability.yml` validates opened and edited task issues separately from code
 CI.
 
@@ -170,8 +176,8 @@ It is a test-only shell, not a messenger release.
 
 1. A human must install and launch the APK from the Brotherhood archive release and
    record the device/API result on `TK-P0-01`.
-2. The Phase 0 branch must run successfully in GitHub Actions. Once GitHub has created
-   the three baseline status contexts, they must be added to `main` protection.
+2. The Phase 0 pull request must remain green after any review changes; its three
+   baseline contexts are already required by `main` protection.
 3. An approved maintainer must review and merge the pull request; direct pushes to
    `main` are not part of the workflow.
 4. Phase P1 architecture and dependency validation begins only after `G-RESET` is
