@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Test policy tooling
         run: python3 -m unittest discover tools -p 'test_*.py'
-      - name: Scan tracked files for forbidden secrets
+      - name: Scan for forbidden secrets and active legacy code
         run: python3 tools/ci/check_forbidden_patterns.py
       - name: Require source-of-truth documents
         run: |

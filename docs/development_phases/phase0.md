@@ -138,11 +138,18 @@ least-privilege permissions and pin third-party actions to immutable commit SHAs
 - `Android baseline`
 
 The policy job checks traceability-tool tests, forbidden secret and legacy patterns,
-and lockfiles. Rust CI checks formatting, tests, and Clippy with warnings denied. Android
-CI checks the dependency lock, unit tests, Android-test compilation, lint, and a
-test-only debug APK. No release keys are available to the workflow.
+and lockfiles. Secret scanning includes unencrypted and encrypted private-key PEM
+headers plus prohibited key-store files. The legacy checks reject the retired Android
+namespace, Cloudflare tunnel identifiers, static ECIES suite, serialized state store,
+and `brotherhood.py` production path in active product/build locations. Architecture,
+migration, and phase records remain able to name the retired components. Unit tests
+cover each rejection boundary and the documentation exception.
 
-Draft pull request 27 is the protected review path for this reset:
+Rust CI checks formatting, tests, and Clippy with warnings denied. Android CI checks
+the dependency lock, unit tests, Android-test compilation, lint, and a test-only debug
+APK. No release keys are available to the workflow.
+
+Pull request 27 is the protected review path for this reset:
 <https://github.com/pmchanel5/TrustKin/pull/27>. Its first Baseline CI run completed
 successfully at <https://github.com/pmchanel5/TrustKin/actions/runs/30678680847>.
 `Repository policy`, `Rust baseline`, and `Android baseline` are now strict required
@@ -158,7 +165,7 @@ The following local checks passed on the Phase 0 tree:
 - `cargo fmt --all -- --check`
 - `cargo test --workspace --all-targets --locked` (one Rust unit test)
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`
-- `python -m unittest discover tools -p test_*.py` (six Python tests)
+- `python -m unittest discover tools -p test_*.py` (14 Python tests)
 - forbidden-pattern and secret-pattern scanning
 - parsing all three `.github/ISSUE_TEMPLATE/*.yml` files as YAML
 - Gradle unit tests, Android-test compilation, lint, and debug APK assembly (61 tasks)
