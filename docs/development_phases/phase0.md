@@ -93,6 +93,12 @@ The security policy was resolved as the repository-wide policy after approval. I
 documents current non-claims, trust boundaries, security invariants, reportable
 findings, exclusions that are not blanket waivers, and required review evidence.
 
+GitHub-native Dependabot vulnerability alerts, automated security updates, secret
+scanning, and secret-scanning push protection are enabled. Their initial alert lists
+were empty. GitHub left secret validity checks and non-provider pattern scanning
+disabled for this repository configuration, so the protected repository-policy job's
+credential scanner remains a required complementary control rather than being removed.
+
 GitHub `main` protection requires one approving review, CODEOWNER review, dismissal of
 stale approvals, approval after the latest push, administrator enforcement, linear
 history, and resolved conversations. Force pushes and branch deletion are disabled.
@@ -173,6 +179,64 @@ status checks on `main`.
 
 `issue-traceability.yml` validates opened and edited task issues separately from code
 CI.
+
+## Post-Phase 0 maintenance: Android API 36 toolchain
+
+On 2026-08-01, after `G-RESET` closed and before Phase P1 implementation began, the
+approved Android build baseline was refreshed as one coordinated compatibility set.
+This maintenance does not change the SOT architecture, protocol, cryptography, trust
+boundaries, product behavior, or the Phase P1 task sequence.
+
+The maintained baseline is:
+
+| Component | Maintained version or value |
+| --- | --- |
+| Gradle wrapper | `8.14.4`, with the distribution SHA-256 pinned |
+| Android Gradle Plugin | `8.13.2` |
+| Kotlin Android plugin | `2.4.10` |
+| Kotlin Compose compiler plugin | `2.4.10` |
+| Android compile/target SDK | API 36 |
+| Android minimum SDK | API 29, unchanged |
+| Compose BOM | `2026.06.01` |
+| Activity Compose | `1.13.0` |
+| Core KTX | `1.18.0` |
+
+Kotlin and the Compose compiler plugin remain version-aligned. The removed
+`kotlinOptions.jvmTarget` DSL was replaced with the typed Kotlin `compilerOptions`
+DSL targeting JVM 17. The Gradle wrapper scripts and JAR were regenerated, `.kotlin/`
+was added to `.gitignore`, and the Android dependency lock was regenerated from the
+complete graph.
+
+The dependency selection deliberately stays below AGP 9 and its built-in-Kotlin
+migration. `androidx.core:core-ktx:1.19.0` was evaluated and rejected because its AAR
+metadata requires API 37 and AGP 9.1.0 or newer. Core KTX `1.18.0` is the compatible
+API 36 line. The resolved graph uses Compose UI `1.11.4`, Material 3 `1.4.0`, and
+Lifecycle `2.9.4`; this coordinated lifecycle resolution removes the binary mismatch
+that caused the isolated Compose BOM Dependabot update to crash lint.
+
+The Phase P1 `TK-P1-08` decision remains unchanged: API 29 is the mandatory baseline,
+and API 28 support still requires its dedicated proof, ADR, and security-equivalence
+decision. The existing BlueStacks `Pie64` instance is API 28 and is therefore expected
+to reject this TrustKin build; it was not treated as a regression.
+
+Local validation completed with:
+
+- dependency-lock regeneration followed by the protected build task set;
+- `testDebugUnitTest`, Android-test Kotlin compilation, `lintDebug`, `assembleDebug`,
+  and `assembleRelease` (117 successful Gradle tasks);
+- successful R8/resource shrinking for the unsigned release build;
+- one connected instrumentation test on a clean API 29 x86_64 emulator;
+- one connected instrumentation test on a clean API 36 x86_64 emulator;
+- successful install and cold launch on both emulators, with the UI tree and visual
+  capture showing the expected TrustKin Phase 0 shell;
+- installed package metadata of version `0.1.0-phase0`, `minSdk=29`, and
+  `targetSdk=36` on both emulators.
+
+The local debug-test APK SHA-256 for this maintenance build is
+`a8a7588fd35005639fef176c6e501d4137c046984efd0cc8080176cf1a14f44a`.
+The local unsigned release APK SHA-256 is
+`94e1630d786f9118ff34a671df64d98ff5d6a3cd89ed2c11fab1717380d72d4f`.
+Neither artifact is a messenger release.
 
 ## Validation evidence
 

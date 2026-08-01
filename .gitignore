@@ -6,6 +6,7 @@ build/
 .venv/
 .vendor/
 .gradle/
+.kotlin/
 local.properties
 *.jks
 *.keystore
