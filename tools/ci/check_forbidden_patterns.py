@@ -11,11 +11,11 @@ from pathlib import Path
 FORBIDDEN_SUFFIXES = (".jks", ".keystore", ".p12", ".pfx")
 PATTERNS = {
     "private-key block": re.compile(
-        r"-----BEGIN (?:ENCRYPTED |RSA |EC |OPENSSH )?PRIVATE KEY-----"
+        r"-----BEGIN [A-Z0-9 -]*PRIVATE KEY(?: BLOCK)?-----"
     ),
     "GitHub token": re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
     "GitHub fine-grained token": re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
-    "AWS access key": re.compile(r"AKIA[0-9A-Z]{16}"),
+    "AWS access key": re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
 }
 
 ACTIVE_IMPLEMENTATION_ROOTS = frozenset({"apps", "crates", "protocol", "services"})
@@ -55,6 +55,18 @@ def tracked_files() -> list[Path]:
 
 def scan_text(text: str) -> list[str]:
     return [name for name, pattern in PATTERNS.items() if pattern.search(text)]
+
+
+def scan_file_content(path: Path, data: bytes) -> list[str]:
+    """Scan ASCII signatures across text, binary, and common Unicode encodings.
+
+    Every forbidden content signature is ASCII. Removing NUL bytes before decoding
+    preserves those signatures in UTF-16/UTF-32 files and prevents one injected NUL
+    from turning credential material into an apparent binary file. Scanning the full
+    tracked file also prevents an oversized text file from bypassing policy checks.
+    """
+    signature_text = data.replace(b"\0", b"").decode("ascii", errors="ignore")
+    return scan_text(signature_text) + scan_legacy_text(path, signature_text)
 
 
 def is_active_implementation_path(path: Path) -> bool:
@@ -97,12 +109,7 @@ def main() -> int:
         except OSError as error:
             failures.append(f"unable to read {path}: {error}")
             continue
-        if b"\0" in data or len(data) > 2_000_000:
-            continue
-        text = data.decode("utf-8", errors="replace")
-        for finding in scan_text(text):
-            failures.append(f"{finding}: {path}")
-        for finding in scan_legacy_text(path, text):
+        for finding in scan_file_content(path, data):
             failures.append(f"{finding}: {path}")
 
     if failures:

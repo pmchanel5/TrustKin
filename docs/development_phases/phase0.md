@@ -154,6 +154,13 @@ and `brotherhood.py` production path in active product/build locations. Architec
 migration, and phase records remain able to name the retired components. Unit tests
 cover each rejection boundary and the documentation exception.
 
+Review hardening removed two content-scan escape hatches. Forbidden ASCII signatures
+are now scanned across the complete tracked file after NUL removal, so UTF-16/UTF-32,
+NUL-injected, binary-looking, and files larger than 2 MB cannot bypass credential or
+active-legacy checks. The private-key matcher accepts any standard PEM label ending in
+`PRIVATE KEY` or `PRIVATE KEY BLOCK`, and AWS temporary access-key IDs are covered
+alongside long-lived IDs. Regression fixtures cover each boundary.
+
 Rust CI checks formatting, tests, and Clippy with warnings denied. Android CI checks
 the dependency lock, unit tests, Android-test compilation, lint, and a test-only debug
 APK. No release keys are available to the workflow.
@@ -174,7 +181,7 @@ The following local checks passed on the Phase 0 tree:
 - `cargo fmt --all -- --check`
 - `cargo test --workspace --all-targets --locked` (one Rust unit test)
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`
-- `python -m unittest discover tools -p test_*.py` (16 Python tests)
+- `python -m unittest discover tools -p test_*.py` (21 Python tests)
 - forbidden-pattern and secret-pattern scanning
 - parsing all three `.github/ISSUE_TEMPLATE/*.yml` files as YAML
 - Gradle unit tests, Android-test compilation, lint, and debug APK assembly (61 tasks)
