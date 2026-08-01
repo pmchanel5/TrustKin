@@ -1,0 +1,84 @@
+name: Development task
+description: Track an approved TrustKin task with requirements and design traceability.
+title: "[TK-] "
+labels: ["type:feature"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include keys, onion addresses, mailbox capabilities, private evidence, or exploitable vulnerability details.
+  - type: input
+    id: task_id
+    attributes:
+      label: Task ID
+      placeholder: TK-P0-01
+    validations:
+      required: true
+  - type: input
+    id: milestone_gate
+    attributes:
+      label: Milestone or gate
+      placeholder: M0 TrustKin Reset / G-RESET
+    validations:
+      required: true
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective and rationale
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and affected components
+    validations:
+      required: true
+  - type: textarea
+    id: implementation
+    attributes:
+      label: Implementation details
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and privacy considerations
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+    validations:
+      required: true
+  - type: textarea
+    id: automated_tests
+    attributes:
+      label: Required automated tests
+    validations:
+      required: true
+  - type: textarea
+    id: human_tests
+    attributes:
+      label: Required human tests
+    validations:
+      required: true
+  - type: textarea
+    id: deliverables
+    attributes:
+      label: Deliverables and blocking classification
+    validations:
+      required: true
+  - type: input
+    id: requirements
+    attributes:
+      label: Requirements references
+      placeholder: GOV-001–009; requirements §20
+    validations:
+      required: true
+  - type: input
+    id: design
+    attributes:
+      label: Design references
+      placeholder: design §§5, 31
+    validations:
+      required: true

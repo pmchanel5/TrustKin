@@ -1,0 +1,19 @@
+name: Issue traceability
+
+on:
+  issues:
+    types: [opened, edited, labeled, unlabeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  traceability:
+    name: Blocking issue traceability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate task references
+        run: python3 tools/traceability/check_issue_traceability.py --event "$GITHUB_EVENT_PATH"

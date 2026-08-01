@@ -1,3 +1,0 @@
--keepattributes *Annotation*
--keep class com.google.crypto.tink.** { *; }
--dontwarn org.conscrypt.**

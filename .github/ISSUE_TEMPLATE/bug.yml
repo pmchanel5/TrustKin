@@ -1,0 +1,52 @@
+name: Bug report
+description: Report reproducible non-security defects in approved TrustKin builds.
+title: "[Bug] "
+labels: ["type:bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Security vulnerabilities belong in private vulnerability reporting. Never post keys, capabilities, private messages, complete onion addresses, or personal diagnostics.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [Android, Windows, iOS, Relay, Build or CI, Documentation]
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction using non-sensitive test data
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: User impact and recovery
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence
+      description: Confirm that secrets, content, stable identifiers, and complete network endpoints were removed.
+    validations:
+      required: true

@@ -1,94 +1,71 @@
-# Brotherhood
+# TrustKin
 
-Brotherhood è un’app Android sperimentale per messaggi privati peer-to-peer basati su
-inviti. Non richiede numero di telefono, e-mail, rubrica, account centrale, server
-Brotherhood, dominio, VPS o servizio a pagamento.
+TrustKin is a public, GPLv3-or-later, privacy-focused messenger under active
+development. Its target architecture supports direct LAN/Tor communication and
+optional opaque store-and-forward mailboxes without a mandatory central TrustKin
+account or message server.
 
-> **Stato di sicurezza:** `0.2.0-alpha02`, non sottoposta ad audit. Il codice integra un
-> runtime Tor reale e crea onion service v3, ma in questo ambiente l’integrazione non è
-> stata eseguita su emulatore o telefono. Non considerare Tor “verificato” e non usare
-> questa alpha in situazioni ad alto rischio.
+> **Current status:** Phase 0 architecture reset. The active application is a
+> test-only Android shell, not a working or audited secure messenger. Do not use it
+> for real or high-risk communication.
 
-## Funzioni implementate
+## Source of truth
 
-- identità locale con chiavi separate di cifratura e firma;
-- archivio AES-256-GCM protetto da una chiave Android Keystore;
-- blocco UI con PIN derivato tramite PBKDF2-HMAC-SHA256;
-- inviti firmati via testo, link e QR, con endpoint LAN e onion v3 autenticati;
-- trasporti intercambiabili: LAN diretta e Tor tramite onion service;
-- selezione LAN → Tor, coda cifrata, retry, backoff, deduplicazione e ricevute firmate;
-- messaggi testuali, immagini ricodificate senza EXIF e vocali fino a 60 secondi;
-- vocali Opus/OGG su Android 10+ e AAC/MP4 su Android 9, divisi in blocchi da 64 KiB;
-- ripresa dei blocchi mancanti dopo interruzione o riavvio;
-- gruppi privati fino a 20 identità, con cifratura separata per destinatario;
-- modalità **Sempre disponibile**, **Bilanciata** e **Solo quando aperta**;
-- diagnostica locale priva di chiavi, contenuti e indirizzi onion;
-- nessun tracker, analytics, Firebase, Supabase, Twilio o backend remoto.
+Development is governed by three approved documents:
 
-Il vecchio prototipo Python/Cloudflare resta nella cartella `app/` come codice legacy, ma
-non viene incluso nell’APK Android.
+- [Product requirements](docs/architecture/requirements.md)
+- [Technical design](docs/architecture/design.md)
+- [Development task plan](docs/architecture/task.md)
 
-## Stato delle verifiche
+Changes that affect requirements, architecture, sequencing, or security gates must
+update the applicable source-of-truth document through the change-control process it
+defines.
 
-La build JVM, i test unitari, la compilazione dei test strumentali, Android lint e gli APK
-debug/release vengono verificati localmente e in CI. Non erano disponibili emulatori, AVD
-o telefoni collegati: LAN fra due installazioni, bootstrap Tor, pubblicazione onion,
-registrazione/riproduzione audio e comportamento OEM in background richiedono ancora il
-piano su dispositivi.
+## Repository boundary
 
-Vedi:
+The active repository starts fresh with:
 
-- [audit alpha01](docs/ALPHA01_AUDIT.md);
-- [integrazione Tor](docs/TOR_INTEGRATION.md);
-- [comportamento in background](docs/BACKGROUND_BEHAVIOR.md);
-- [piano su due dispositivi](docs/TWO_DEVICE_TEST_PLAN.md);
-- [revisione crittografica](docs/CRYPTO_REVIEW_ALPHA02.md);
-- [limiti reali](docs/LIMITATIONS.md).
+- package/application ID `org.trustkin.app`;
+- Android 10 / API 29 as the production baseline;
+- a shared Rust workspace for future security-critical core logic;
+- a native Kotlin/Jetpack Compose Android shell;
+- no active Brotherhood static crypto, serialized state, or Python/Cloudflare code.
 
-## Requisiti e build
+The final Brotherhood experimental alpha remains available at the immutable
+[`brotherhood-v0.2.1-alpha03-fix`](https://github.com/pmchanel5/TrustKin/releases/tag/brotherhood-v0.2.1-alpha03-fix)
+archive. It is unaudited and unsupported for high-risk use.
 
-- Android 9 o successivo (`minSdk 28`);
-- `targetSdk 35`;
+## Build the Phase 0 baseline
+
+Prerequisites:
+
+- Rust 1.95.0 (selected automatically by `rust-toolchain.toml`);
 - JDK 17;
 - Android SDK Platform 35.
 
-Windows:
-
 ```powershell
-$env:JAVA_HOME = "C:\percorso\al\jdk-17"
-$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
-.\gradlew.bat clean testDebugUnitTest lintDebug assembleDebug assembleRelease
+cargo fmt --all -- --check
+cargo test --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+./gradlew.bat --no-daemon testDebugUnitTest compileDebugAndroidTestKotlin lintDebug assembleDebug
 ```
 
-Linux/macOS:
+The generated APK is test-only and uses an Android development signing key.
 
-```bash
-export JAVA_HOME=/percorso/al/jdk-17
-export ANDROID_HOME="$HOME/Android/Sdk"
-./gradlew clean testDebugUnitTest lintDebug assembleDebug assembleRelease
-```
+## Governance and security
 
-L’APK debug è firmato esclusivamente con la chiave di sviluppo Android. L’APK release
-prodotto dal repository è **non firmato** finché non viene applicata una firma locale
-controllata. Istruzioni complete: [docs/BUILD.md](docs/BUILD.md) e
-[docs/RELEASE.md](docs/RELEASE.md).
+- [Contribution policy](CONTRIBUTING.md)
+- [Project governance](GOVERNANCE.md)
+- [Security reporting](SECURITY.md)
+- [Privacy posture](PRIVACY.md)
+- [Trademark policy](TRADEMARKS.md)
 
-## Prova su due telefoni
+Do not open public issues containing private keys, PINs, onion addresses, mailbox
+capabilities, message content, or other private evidence. Use GitHub private
+vulnerability reporting for security reports.
 
-Seguire [docs/TWO_DEVICE_TEST_PLAN.md](docs/TWO_DEVICE_TEST_PLAN.md). La schermata
-**Impostazioni → Open source e diagnostica** mostra versione, tipo build, stato LAN/Tor,
-coda, retry, ultimo errore tecnico e ID abbreviato; non mostra indirizzi onion o segreti.
+## License
 
-## Modello di fiducia
-
-Tor è solo un trasporto: ogni payload resta cifrato e firmato dal protocollo Brotherhood.
-L’alpha non offre forward secrecy, post-compromise security, recupero dell’identità o
-anonimato assoluto. Un telefono compromesso o un destinatario malevolo può leggere e
-divulgare i messaggi in chiaro.
-
-## Licenza
-
-Brotherhood è distribuita sotto GNU GPLv3 o successiva. Il codice applicativo resta
-un’implementazione indipendente; alpha02 usa però il wrapper Tor pubblicato dal progetto
-Briar e il runtime `tor-android`, con le rispettive licenze. Vedi [NOTICE.md](NOTICE.md),
-[docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) e [LICENSE](LICENSE).
+TrustKin source code is licensed under
+[GNU GPLv3 or later](LICENSE). Project names and logos are addressed separately in
+[TRADEMARKS.md](TRADEMARKS.md).

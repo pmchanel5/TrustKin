@@ -1,29 +1,25 @@
-# Privacy
+# TrustKin Privacy Posture
 
-Brotherhood non raccoglie, monetizza o invia al progetto dati personali. Non include
-telemetria, analytics, pubblicità, tracker, crash reporter remoto, Firebase, rubrica,
-posizione o identificatori pubblicitari.
+TrustKin is currently a Phase 0 architecture shell. It does not yet provide messaging,
+identity, Tor, mailbox, analytics, telemetry, or remote service functionality.
 
-Identità, chiavi, contatti, messaggi, gruppi, code, blocchi vocali incompleti e impostazioni
-restano nell’archivio cifrato dell’app. I messaggi passano direttamente al destinatario via
-LAN oppure attraverso la rete Tor. Non esiste un server Brotherhood.
+The target product requirements prohibit advertising identifiers, commercial
+behavioral analytics, metadata sales, hidden telemetry, centralized plaintext access,
+key escrow, covert remote access, and mandatory content scanning.
 
-Un invito condiviso esplicitamente contiene nome dichiarato, chiavi pubbliche, impronta,
-endpoint LAN disponibile e indirizzo onion v3. L’onion è firmato dall’identità, non viene
-pubblicato in directory e non è mostrato normalmente nella UI. Il destinatario dell’invito
-può comunque conservarlo e condividerlo.
+Future components must document what they can observe. In particular:
 
-Il microfono viene usato solo dopo permesso Android e pressione prolungata del comando
-vocale. Non viene registrato audio in background. Il file di registrazione e quello di
-riproduzione sono temporanei nel sandbox privato e vengono rimossi al termine o
-all’annullamento; la memoria flash non consente una garanzia di cancellazione fisica.
+- local clients will necessarily process plaintext and relationship state while an
+  authorized user is using an uncompromised device;
+- LAN peers and networks may observe addressing, timing, and sizes;
+- Tor reduces direct address exposure but cannot guarantee perfect anonymity or defeat
+  every traffic-correlation adversary;
+- optional mailbox relays may observe queue activity, timing, sizes, and direct IP
+  metadata when HTTPS is used without Tor, but must not possess message-decryption keys;
+- optional push providers may receive only content-free wake signals.
 
-La modalità **Sempre disponibile** mantiene una notifica visibile e una connessione di rete.
-La modalità **Bilanciata** usa esecuzioni periodiche Android e non promette ricezione
-immediata. Android e il produttore del telefono possono osservare tempi d’uso, consumo,
-rete e metadati del processo.
+Before stable 1.0, diagnostics must remain local and manually exportable. Reports and
+evidence are disclosed only through explicit user action.
 
-Tor riduce l’esposizione dell’IP fra contatti, ma non elimina dimensioni, tempi e correlazioni
-del traffico. Guardie, rete locale, ISP, sistema operativo e un avversario globale possono
-osservare metadati. Eliminare l’identità rimuove stato e chiave Keystore localmente, non le
-copie già ricevute da altri.
+The normative privacy requirements are in
+[`docs/architecture/requirements.md`](docs/architecture/requirements.md).

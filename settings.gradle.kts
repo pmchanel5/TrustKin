@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Brotherhood"
-include(":app")
+rootProject.name = "TrustKin"
+include(":apps:android:app")
