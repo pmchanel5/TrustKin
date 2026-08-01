@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 TASK_HEADER = re.compile(r"^### (TK-P[01]-\d+) .*?$", re.MULTILINE)
+MARKDOWN_HEADER = re.compile(r"^#{1,6}[ \t]+", re.MULTILINE)
 FIELD = re.compile(
     r"^- \*\*(?P<name>[^*]+):\*\* (?P<value>.*?)(?=^- \*\*|\Z)",
     re.MULTILINE | re.DOTALL,
@@ -46,11 +47,12 @@ def parse_task_sections(path: Path) -> dict[str, dict[str, str]]:
     text = path.read_text(encoding="utf-8")
     headers = list(TASK_HEADER.finditer(text))
     sections: dict[str, dict[str, str]] = {}
-    for index, header in enumerate(headers):
+    for header in headers:
         task_id = header.group(1)
         if task_id not in PLANS:
             continue
-        end = headers[index + 1].start() if index + 1 < len(headers) else len(text)
+        next_header = MARKDOWN_HEADER.search(text, header.end())
+        end = next_header.start() if next_header else len(text)
         body = text[header.end() : end]
         fields = {
             match.group("name").strip(): match.group("value").strip()

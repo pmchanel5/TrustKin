@@ -125,6 +125,15 @@ Created tracking issues:
 `tools/traceability/check_issue_traceability.py` validates gate-blocking issue text.
 Its unit tests pass, and live issue 13 passes the same validation.
 
+Review hardening changed `tools/github/bootstrap_phase_issues.py` to end each parsed
+task card at the next Markdown heading. This prevents the last planned task in a phase
+from absorbing the following phase introduction or, for the last planned P1 task, the
+remainder of the SOT. Synthetic end-of-phase and current-SOT regression tests verify
+the exact `TK-P0-06` and `TK-P1-08` reference fields used by generated issue bodies.
+The previously generated bodies of issues 18 and 26 were regenerated with the fixed
+parser and verified against `rendered_body()`; their SOT references are now limited to
+`Requirements §20; design §§28, 30, 32.` and `PLAT-003; design §24.4.`, respectively.
+
 ## TK-P0-06: protected build baseline
 
 The repository pins Rust with `rust-toolchain.toml`, commits `Cargo.lock`, enables
@@ -165,7 +174,7 @@ The following local checks passed on the Phase 0 tree:
 - `cargo fmt --all -- --check`
 - `cargo test --workspace --all-targets --locked` (one Rust unit test)
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`
-- `python -m unittest discover tools -p test_*.py` (14 Python tests)
+- `python -m unittest discover tools -p test_*.py` (16 Python tests)
 - forbidden-pattern and secret-pattern scanning
 - parsing all three `.github/ISSUE_TEMPLATE/*.yml` files as YAML
 - Gradle unit tests, Android-test compilation, lint, and debug APK assembly (61 tasks)
